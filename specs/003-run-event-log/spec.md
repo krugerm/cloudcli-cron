@@ -1,0 +1,126 @@
+# Feature Specification: Run Event Log
+
+**Feature Branch**: `003-run-event-log`  
+**Created**: 2026-10-29  
+**Status**: Draft  
+**Input**: User description: "Keep the complete history of scheduled prompt runs. Move the runs into an append-only SQLite file."  
+**Technical design**: [`docs/superpowers/specs/2026-10-29-run-event-log-design.md`](../../docs/superpowers/specs/2026-10-29-run-event-log-design.md)
+
+## Clarifications
+
+### Session 2026-10-29
+
+- Q: What does "append-only" mean for a run that changes state (running → succeeded)? → A: An event log. Every state change is a new row; rows are never updated or deleted. A run's current state is its latest event.
+- Q: One database for all workspaces, or one per workspace? → A: One `runs.db` for all workspaces, with a workspace column.
+- Q: What happens to runs already stored in the workspace JSON files? → A: Imported once on startup, after a backup copy of each JSON file is saved.
+- Q: Which SQLite library? → A: The built-in `node:sqlite`. The plugin requires Node 22.13 or later.
+- Q: Should history be pruned? → A: No. Complete history is kept.
+
+## User Scenarios & Testing *(mandatory)*
+
+### User Story 1 - Keep every run (Priority: P1)
+
+A user with frequent schedules opens Recent Runs weeks later and can page back to any run, for any task, without other tasks' history having been pushed out.
+
+**Why this priority**: Today history is capped at 500 runs per workspace, shared by all tasks. Sub-daily schedules would erase history within hours.
+
+**Independent Test**: Seed more than 500 runs for one task and a few for another, then verify both tasks' runs are all reachable through paging.
+
+**Acceptance Scenarios**:
+
+1. **Given** a workspace with 10,000 recorded runs, **When** the user opens Recent Runs, **Then** the newest 100 are shown and a "Load older runs" control is available.
+2. **Given** the user clicks "Load older runs" repeatedly, **When** the oldest run is reached, **Then** the control disappears and no run was shown twice or skipped.
+3. **Given** one task has produced thousands of runs, **When** the user views another task's runs, **Then** all of that task's runs are still present.
+
+---
+
+### User Story 2 - See how a run reached its state (Priority: P2)
+
+A user investigating a failed or odd run opens its history and sees each state change with its time and cause.
+
+**Why this priority**: The event log exists for this. It also explains runs closed automatically after a restart.
+
+**Independent Test**: Execute a run, then open its history and verify the started and finished events with times and source.
+
+**Acceptance Scenarios**:
+
+1. **Given** a completed run, **When** the user opens its History, **Then** they see `started` and `succeeded` (or `failed`) with local times and the source (scheduler, manual, retry).
+2. **Given** a retried run, **When** the user opens the retry's History, **Then** the original run is unchanged and the retry links to it.
+
+---
+
+### User Story 3 - Runs interrupted by a restart are closed (Priority: P2)
+
+A user whose machine restarted mid-run no longer sees that run stuck as "running" forever.
+
+**Why this priority**: Today such runs stay "running" indefinitely and mislead the dashboard.
+
+**Independent Test**: Start a run, stop the plugin server before it finishes, start it again, and check the run's state.
+
+**Acceptance Scenarios**:
+
+1. **Given** a run was in progress when the plugin server stopped, **When** the server starts again, **Then** the run shows as failed with "Plugin server restarted while this run was in progress." and a `recovery` event in its history.
+
+---
+
+### User Story 4 - Upgrade keeps existing history (Priority: P1)
+
+A user upgrading from v0.2.0 keeps all runs previously stored in the workspace JSON files.
+
+**Why this priority**: Losing history on upgrade is unacceptable.
+
+**Independent Test**: Start the new version against a data directory produced by v0.2.0 and compare run lists before and after.
+
+**Acceptance Scenarios**:
+
+1. **Given** v0.2.0 workspace files with runs, **When** the new version starts, **Then** every valid run appears in Recent Runs with the same status, times and summary, and each original file is kept as `<key>.v1.json.bak`.
+2. **Given** the import was interrupted, **When** the server starts again, **Then** the import completes with no duplicated runs.
+
+### Edge Cases
+
+- A workspace file contains invalid run entries: they are skipped, kept in the backup, and the existing repair warning is shown.
+- `runs.db` cannot be opened or is from a newer plugin version: the plugin server stops at startup with the file path and reason.
+- Node older than 22.13: the plugin server stops at startup with "Scheduled Prompt needs Node 22.13+ (found X)".
+- Several runs share the same scheduled time: paging neither skips nor repeats them.
+- A workspace or task is deleted: its events remain in `runs.db`.
+
+## Requirements *(mandatory)*
+
+### Functional Requirements
+
+- **FR-001**: The system MUST record every run state change as a new row in a single SQLite database, `runs.db`, in the plugin's existing data directory.
+- **FR-002**: The database MUST reject updates and deletes of recorded events.
+- **FR-003**: The system MUST derive each run's current state (status, start time, finish time, summary, failure reason) from its events and expose it in the existing run format, so existing API consumers keep working.
+- **FR-004**: The system MUST NOT cap or prune run history.
+- **FR-005**: The run list API MUST support cursor paging (`before`) and return a `nextCursor`; callers that do not pass `before` MUST receive the newest runs as today.
+- **FR-006**: The system MUST expose a run's events in order through `GET /v1/runs/:id/events`.
+- **FR-007**: On startup, the system MUST close every run left in progress with a `failed` event marked as recovery.
+- **FR-008**: On startup, the system MUST import runs from v0.2.0 workspace files into `runs.db`, keep a backup of each file, and remove `runs` from the workspace file. The import MUST be safe to repeat.
+- **FR-009**: Task definitions MUST remain in the per-workspace JSON files.
+- **FR-010**: The workspace view MUST offer "Load older runs" when more runs exist, and a per-run History view.
+- **FR-011**: The plugin server MUST refuse to start on Node older than 22.13 with an explicit message.
+- **FR-012**: User-facing behavior MUST preserve loading, empty, success, error, and recovery states consistent with existing CloudCLI conventions.
+
+### Key Entities *(include if feature involves data)*
+
+- **Run Event**: One state change of one run: run, task, workspace, occurrence, scheduled time, event type (started, succeeded, failed, missed), time, source (scheduler, manual, retry, recovery, migrated), summary, failure reason, retry link, execution request.
+- **Run**: The current state of a run, derived from its events; same shape as the existing `ScheduledRun`.
+- **Run Page**: A slice of runs for a workspace (optionally one task) plus the cursor for the next slice.
+
+## Success Criteria *(mandatory)*
+
+### Measurable Outcomes
+
+- **SC-001**: With 500,000 recorded events, the first page of a workspace's runs loads in under 50 ms.
+- **SC-002**: With 500,000 recorded events, the global dashboard's latest-runs-per-task query completes in under 50 ms.
+- **SC-003**: Recording one event takes under 5 ms.
+- **SC-004**: 100% of valid v0.2.0 runs are present after upgrade, with identical status, times and summaries.
+- **SC-005**: After a restart, 0 runs remain in the "running" state from before the restart.
+- **SC-006**: Recording a run no longer rewrites the workspace JSON file.
+
+## Assumptions
+
+- The plugin server runs on the `node` found on the PATH, as started by CloudCLI, and users of CloudCLI run Node 22 (CloudCLI targets Node 22).
+- About 1 KB of storage per run is acceptable; pruning can be added later if needed.
+- Statuses `scheduled` and `canceled` are never produced today and need no event type.
+- Cron expressions (sub-daily schedules) are delivered separately in `004-cron-expressions`, building on this feature.
