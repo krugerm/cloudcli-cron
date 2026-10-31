@@ -16,6 +16,11 @@
 - Q: Which SQLite library? → A: The built-in `node:sqlite`. The plugin requires Node 22.13 or later.
 - Q: Should history be pruned? → A: No. Complete history is kept.
 
+### Session 2026-10-31 (design review)
+
+- Q: Where does a task's last run status come from once runs leave the JSON file? → A: It is derived from the run history whenever tasks are served, and no longer stored.
+- Q: How are task edits protected from being overwritten by a finishing run? → A: Task changes go through a per-workspace lock that reloads the file before writing, and a finishing run writes nothing to the task file.
+
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 - Keep every run (Priority: P1)
@@ -30,7 +35,7 @@ A user with frequent schedules opens Recent Runs weeks later and can page back t
 
 1. **Given** a workspace with 10,000 recorded runs, **When** the user opens Recent Runs, **Then** the newest 100 are shown and a "Load older runs" control is available.
 2. **Given** the user clicks "Load older runs" repeatedly, **When** the oldest run is reached, **Then** the control disappears and no run was shown twice or skipped.
-3. **Given** one task has produced thousands of runs, **When** the user views another task's runs, **Then** all of that task's runs are still present.
+3. **Given** one task has produced thousands of runs, **When** the user filters Recent Runs to another task, **Then** all of that task's runs are present and pageable.
 
 ---
 
@@ -45,7 +50,7 @@ A user investigating a failed or odd run opens its history and sees each state c
 **Acceptance Scenarios**:
 
 1. **Given** a completed run, **When** the user opens its History, **Then** they see `started` and `succeeded` (or `failed`) with local times and the source (scheduler, manual, retry).
-2. **Given** a retried run, **When** the user opens the retry's History, **Then** the original run is unchanged and the retry links to it.
+2. **Given** a retried run, **When** the user opens the retry's History, **Then** it shows "Retry of run scheduled for <time>" and the original run's history is unchanged.
 
 ---
 
@@ -59,7 +64,7 @@ A user whose machine restarted mid-run no longer sees that run stuck as "running
 
 **Acceptance Scenarios**:
 
-1. **Given** a run was in progress when the plugin server stopped, **When** the server starts again, **Then** the run shows as failed with "Plugin server restarted while this run was in progress." and a `recovery` event in its history.
+1. **Given** a run was in progress when the plugin server stopped, **When** the server starts again, **Then** the run shows as failed with "Plugin server restarted while this run was in progress.", a `recovery` event in its history, and the task's last status is failed.
 
 ---
 
@@ -78,9 +83,12 @@ A user upgrading from v0.2.0 keeps all runs previously stored in the workspace J
 
 ### Edge Cases
 
-- A workspace file contains invalid run entries: they are skipped, kept in the backup, and the existing repair warning is shown.
+- A workspace file contains invalid run entries: they are skipped during import, kept in the backup, and their count is written to the plugin server log.
+- A task is paused, edited or deleted while one of its runs is executing: the change survives the end of the run.
+- An error while processing one workspace during a scheduler tick: other workspaces are still processed and the plugin server keeps running.
+- A retry request names a run from a different workspace: it is rejected as "Run not found".
 - `runs.db` cannot be opened or is from a newer plugin version: the plugin server stops at startup with the file path and reason.
-- Node older than 22.13: the plugin server stops at startup with "Scheduled Prompt needs Node 22.13+ (found X)".
+- Node older than 22.13, or 23.0–23.3: the plugin server stops at startup with "Scheduled Prompt needs Node 22.13+ (found X)".
 - Several runs share the same scheduled time: paging neither skips nor repeats them.
 - A workspace or task is deleted: its events remain in `runs.db`.
 
@@ -92,14 +100,18 @@ A user upgrading from v0.2.0 keeps all runs previously stored in the workspace J
 - **FR-002**: The database MUST reject updates and deletes of recorded events.
 - **FR-003**: The system MUST derive each run's current state (status, start time, finish time, summary, failure reason) from its events and expose it in the existing run format, so existing API consumers keep working.
 - **FR-004**: The system MUST NOT cap or prune run history.
-- **FR-005**: The run list API MUST support cursor paging (`before`) and return a `nextCursor`; callers that do not pass `before` MUST receive the newest runs as today.
+- **FR-005**: The run list API MUST support cursor paging (`before`) and an optional `taskId` filter, and return a `nextCursor`; callers that pass neither MUST receive the newest runs as today.
 - **FR-006**: The system MUST expose a run's events in order through `GET /v1/runs/:id/events`.
 - **FR-007**: On startup, the system MUST close every run left in progress with a `failed` event marked as recovery.
 - **FR-008**: On startup, the system MUST import runs from v0.2.0 workspace files into `runs.db`, keep a backup of each file, and remove `runs` from the workspace file. The import MUST be safe to repeat.
 - **FR-009**: Task definitions MUST remain in the per-workspace JSON files.
-- **FR-010**: The workspace view MUST offer "Load older runs" when more runs exist, and a per-run History view.
-- **FR-011**: The plugin server MUST refuse to start on Node older than 22.13 with an explicit message.
+- **FR-010**: The workspace view MUST offer a task filter, "Load older runs" when more runs exist, and a per-run History view; refreshing after an action MUST NOT discard older pages already loaded.
+- **FR-011**: The plugin server MUST refuse to start on Node versions where `node:sqlite` needs a flag (below 22.13, and 23.0–23.3) with an explicit message.
 - **FR-012**: User-facing behavior MUST preserve loading, empty, success, error, and recovery states consistent with existing CloudCLI conventions.
+- **FR-013**: A task's last run status MUST be derived from the run history, not stored separately, so it can never disagree with the runs.
+- **FR-014**: Changes to a task made while one of its runs executes MUST NOT be overwritten when the run finishes.
+- **FR-015**: A failure while processing one workspace in a scheduler tick MUST NOT stop other workspaces or terminate the plugin server.
+- **FR-016**: Run lookups for retry and history MUST be limited to the requesting workspace.
 
 ### Key Entities *(include if feature involves data)*
 
@@ -112,15 +124,15 @@ A user upgrading from v0.2.0 keeps all runs previously stored in the workspace J
 ### Measurable Outcomes
 
 - **SC-001**: With 500,000 recorded events, the first page of a workspace's runs loads in under 50 ms.
-- **SC-002**: With 500,000 recorded events, the global dashboard's latest-runs-per-task query completes in under 50 ms.
+- **SC-002**: With 500,000 recorded events across 20 tasks, the global dashboard's per-task run summaries complete in under 50 ms.
 - **SC-003**: Recording one event takes under 5 ms.
-- **SC-004**: 100% of valid v0.2.0 runs are present after upgrade, with identical status, times and summaries.
+- **SC-004**: 100% of valid v0.2.0 runs are present after upgrade, with identical status, start and finish times, and summaries (runs that were still `running` are closed as failed by recovery).
 - **SC-005**: After a restart, 0 runs remain in the "running" state from before the restart.
-- **SC-006**: Recording a run no longer rewrites the workspace JSON file.
+- **SC-006**: Finishing a run never rewrites the workspace JSON file; starting a scheduled run rewrites it only to advance the next run time.
 
 ## Assumptions
 
 - The plugin server runs on the `node` found on the PATH, as started by CloudCLI, and users of CloudCLI run Node 22 (CloudCLI targets Node 22).
-- About 1 KB of storage per run is acceptable; pruning can be added later if needed.
+- Several KB of storage per run (captured output and the prompt) is acceptable; an every-minute task grows `runs.db` by roughly 2–3 GB per year. Retention is a likely follow-up feature.
 - Statuses `scheduled` and `canceled` are never produced today and need no event type.
 - Cron expressions (sub-daily schedules) are delivered separately in `004-cron-expressions`, building on this feature.
