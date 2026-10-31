@@ -4,6 +4,27 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project uses semantic version tags for GitHub releases.
 
+## [0.3.0] - 2026-10-31
+
+### Added
+
+- Complete run history in an append-only SQLite event log (`runs.db`), with "Load older runs" paging, a per-task filter and a per-run event History.
+- One-time import of v0.2.0 run history at startup, with a `.v1.json.bak` backup per workspace.
+- Runs interrupted by a plugin restart are closed as failed with a recovery event.
+
+### Fixed
+
+- A task paused, edited or deleted while its run executed was overwritten when the run finished.
+- Two overlapping scheduler ticks could start the same occurrence twice.
+- Opening a workspace between a run's due time and the next tick silently skipped that run.
+- Editing a task's prompt inside the due window skipped the due run.
+- An error in one workspace stopped the scheduler tick and could crash the plugin server.
+
+### Changed
+
+- Requires Node.js 22.13+ (or 23.4+).
+- `GET /v1/runs` without `limit` now returns 100 runs (was 500); page with `before`.
+
 ## [0.1.0] - 2026-04-26
 
 Initial public release of `Scheduled Prompt`, a local-first CloudCLI / ClaudeCodeUI plugin for workspace-scoped scheduled prompts.

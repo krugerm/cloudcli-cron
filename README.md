@@ -45,7 +45,7 @@ This is a local-first plugin release focused on workspace-scoped scheduling plus
 
 ## Requirements
 
-- Node.js 18+
+- Node.js 22.13+ (or 23.4+), for the built-in `node:sqlite` run history
 - A CloudCLI-compatible host with plugin support
 - At least one supported local CLI installed and authenticated if required:
   - `codex`
@@ -163,23 +163,26 @@ Supported argument templates:
 
 ## Execution Timing
 
-- Automatic runs are attempted only for occurrences that are still within the scheduler grace window.
+- Automatic runs are attempted only for occurrences that are still within the scheduler grace window (90 seconds).
 - If the plugin or host was unavailable long enough for an occurrence to become stale, that occurrence is recorded as `missed`.
 - Recurring schedules record each missed slot in history, then continue from the next future occurrence without catch-up replay.
+- Each occurrence runs at most once, even if a run is still in progress when the next scheduler tick fires.
+- Editing a task's name or prompt never skips a due run; changing its schedule or resuming it recomputes the next run from now.
+- A run that was in progress when the plugin stopped is marked `failed` ("Plugin server restarted while this run was in progress.") at the next start.
 
 ## Storage
 
-Workspace ledgers are stored locally under:
+Data is stored locally under:
 
 ```text
 ~/.cloudcli-workspace-scheduled-prompts/
 ```
 
-Each workspace gets a separate JSON ledger containing:
+- `<workspace>.json`: one per workspace, holding its schedules and execution profile.
+- `runs.db`: the complete run history for all workspaces, as an append-only SQLite event log. Nothing is ever deleted from it, so expect several KB per run; an every-minute schedule adds roughly 2–3 GB per year.
+- `<workspace>.v1.json.bak`: a copy of each v0.2.0 ledger, kept when its run history was imported into `runs.db`.
 
-- schedules
-- run history
-- execution profile
+**Rollback to v0.2.0:** stop CloudCLI, check out v0.2.0 in the plugin folder, rename each `<stem>.v1.json.bak` back to `<stem>.json`, and delete any `<key>.json` whose `migratedFrom` names it. Task edits and runs made after the upgrade are not visible to v0.2.0; the runs remain in `runs.db`.
 
 ## Skills And Codex
 
@@ -238,9 +241,14 @@ Older saved Codex profiles used an invalid argument layout.
 
 The plugin now auto-normalizes the legacy Codex preset on reload.
 
+### A Workspace Shows "Run history import failed"
+
+The workspace's v0.2.0 run history could not be imported into `runs.db` (see the plugin log). The workspace is read-only and not scheduled until the import succeeds; it is retried on every plugin start. No history is lost: the original ledger and its `.v1.json.bak` are kept.
+
 ## Known Limits
 
 - No cron syntax
+- Run history is never pruned
 - No external notification channel
 - No built-in command validation button yet
 - No direct reuse of the live host chat session

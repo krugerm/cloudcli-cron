@@ -1,7 +1,7 @@
 {
   "name": "workspace-scheduled-prompts",
   "displayName": "Scheduled Prompt",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Create and monitor scheduled prompts per workspace in CloudCLI.",
   "author": "OpenAI Codex",
   "icon": "icon.svg",
