@@ -38,6 +38,9 @@ function createApi(): PluginAPI {
           warnings: []
         };
       }
+      if (method === "GET" && path.startsWith("/v1/runs?")) {
+        return { runs: [], nextCursor: null };
+      }
       throw new Error(`Unexpected RPC: ${method} ${path}`);
     }
   };

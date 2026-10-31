@@ -645,6 +645,9 @@ describe("global dashboard view", () => {
           globalRequestCount += 1;
           return globalRequestCount > 1 ? updatedSnapshot : snapshot;
         }
+        if (method === "GET" && path.startsWith("/v1/runs?")) {
+          return { runs: [], nextCursor: null };
+        }
         throw new Error(`Unexpected RPC: ${method} ${path}`);
       }
     };
@@ -711,6 +714,9 @@ describe("global dashboard view", () => {
         if (method === "GET" && path.startsWith("/v1/global-dashboard")) {
           globalRequestCount += 1;
           return globalRequestCount > 1 ? updatedSnapshot : snapshot;
+        }
+        if (method === "GET" && path.startsWith("/v1/runs?")) {
+          return { runs: [], nextCursor: null };
         }
         throw new Error(`Unexpected RPC: ${method} ${path}`);
       }
@@ -789,6 +795,9 @@ describe("global dashboard view", () => {
             runs: []
           };
         }
+        if (method === "GET" && path.startsWith("/v1/runs?")) {
+          return { runs: [], nextCursor: null };
+        }
         throw new Error(`Unexpected RPC: ${method} ${path}`);
       }
     };
@@ -800,12 +809,7 @@ describe("global dashboard view", () => {
     Array.from(container.querySelectorAll<HTMLButtonElement>("button"))
       .find((button) => button.textContent === "Open Workspace")
       ?.click();
-    await Promise.resolve();
-    await Promise.resolve();
-    await Promise.resolve();
-    await Promise.resolve();
-
-    expect(container.textContent).toContain("Workspace view task");
+    await vi.waitFor(() => expect(container.textContent).toContain("Workspace view task"));
     expect(container.textContent).toContain("Workspace");
 
     app.unmount();
@@ -1192,6 +1196,9 @@ describe("global dashboard view", () => {
           };
         }
 
+        if (method === "GET" && path.startsWith("/v1/runs?")) {
+          return { runs: [], nextCursor: null };
+        }
         throw new Error(`Unexpected RPC: ${method} ${path}`);
       }
     };
@@ -1252,6 +1259,9 @@ describe("global dashboard view", () => {
             runs: []
           };
         }
+        if (method === "GET" && path.startsWith("/v1/runs?")) {
+          return { runs: [], nextCursor: null };
+        }
         throw new Error(`Unexpected RPC: ${method} ${path}`);
       }
     };
@@ -1289,6 +1299,9 @@ describe("global dashboard view", () => {
             tasks: [],
             runs: []
           };
+        }
+        if (method === "GET" && path.startsWith("/v1/runs?")) {
+          return { runs: [], nextCursor: null };
         }
         throw new Error(`Unexpected RPC: ${method} ${path}`);
       }
@@ -1332,6 +1345,9 @@ describe("global dashboard view", () => {
             tasks: [],
             runs: []
           };
+        }
+        if (method === "GET" && path.startsWith("/v1/runs?")) {
+          return { runs: [], nextCursor: null };
         }
         throw new Error(`Unexpected RPC: ${method} ${path}`);
       }

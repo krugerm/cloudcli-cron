@@ -14,6 +14,11 @@ export interface AppState {
   workspacePath: string | null;
   tasks: WorkspaceTask[];
   runs: ScheduledRun[];
+  runsNextCursor: string | null;
+  runsTaskFilter: string | null;
+  runsGeneration: number;
+  runsLoadingOlder: boolean;
+  runsError: string | null;
   capability: ExecutionCapability;
   executionProfile: ExecutionProfile | null;
   error: string | null;
@@ -41,6 +46,11 @@ export class AppStateStore {
     workspacePath: null,
     tasks: [],
     runs: [],
+    runsNextCursor: null,
+    runsTaskFilter: null,
+    runsGeneration: 0,
+    runsLoadingOlder: false,
+    runsError: null,
     capability: DEFAULT_CAPABILITY,
     executionProfile: null,
     error: null,

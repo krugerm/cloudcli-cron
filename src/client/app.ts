@@ -589,7 +589,7 @@ export class WorkspaceScheduledPromptsApp {
 
       this.updateGlobalSnapshotFromAction(response);
       if (this.state.snapshot.workspacePath === response.task.workspacePath) {
-        const refreshed = await this.loadFromContext(response.task.workspacePath);
+        const refreshed = await this.loadFromContext(response.task.workspacePath, "refresh");
         if (refreshed) {
           this.state.patch({ highlightedTaskId: response.task.id });
         }
@@ -629,13 +629,77 @@ export class WorkspaceScheduledPromptsApp {
     await this.loadGlobalDashboard();
   }
 
-  async loadFromContext(workspacePath: string | null): Promise<boolean> {
+  private refreshLimit(): number {
+    return Math.min(500, Math.max(100, this.state.snapshot.runs.length));
+  }
+
+  /** Every list request records the generation it was sent under; stale responses are dropped. */
+  private async reloadRuns(workspacePath: string, limit: number): Promise<void> {
+    const generation = this.state.snapshot.runsGeneration + 1;
+    this.state.patch({ runsGeneration: generation });
+    const taskId = this.state.snapshot.runsTaskFilter;
+    try {
+      const page = await this.rpc.listRuns(workspacePath, { limit, taskId });
+      const current = this.state.snapshot;
+      if (current.runsGeneration !== generation || current.workspacePath !== workspacePath) {
+        return;
+      }
+      this.state.patch({ runs: page.runs, runsNextCursor: page.nextCursor, runsError: null });
+    } catch (error) {
+      if (this.state.snapshot.runsGeneration === generation) {
+        this.state.patch({ runsError: error instanceof Error ? error.message : "Failed to load runs." });
+      }
+    }
+  }
+
+  private async loadOlderRuns(): Promise<void> {
+    const { workspacePath, runsNextCursor: before, runsGeneration: generation, runsTaskFilter: taskId, runsLoadingOlder } =
+      this.state.snapshot;
+    if (!workspacePath || !before || runsLoadingOlder) {
+      return;
+    }
+    this.state.patch({ runsLoadingOlder: true });
+    try {
+      const page = await this.rpc.listRuns(workspacePath, { before, limit: 100, taskId });
+      const current = this.state.snapshot;
+      if (
+        current.runsGeneration !== generation ||
+        current.runsNextCursor !== before ||
+        current.workspacePath !== workspacePath
+      ) {
+        return;
+      }
+      this.state.patch({ runs: [...current.runs, ...page.runs], runsNextCursor: page.nextCursor, runsError: null });
+    } catch (error) {
+      if (this.state.snapshot.runsGeneration === generation) {
+        this.state.patch({ runsError: error instanceof Error ? error.message : "Failed to load older runs." });
+      }
+    } finally {
+      this.state.patch({ runsLoadingOlder: false });
+    }
+  }
+
+  private async setRunsTaskFilter(taskId: string | null): Promise<void> {
+    const workspacePath = this.state.snapshot.workspacePath;
+    if (!workspacePath) {
+      return;
+    }
+    this.state.patch({ runsTaskFilter: taskId, runs: [], runsNextCursor: null });
+    await this.reloadRuns(workspacePath, 100);
+  }
+
+  async loadFromContext(workspacePath: string | null, mode: "switch" | "refresh" = "switch"): Promise<boolean> {
     if (!workspacePath) {
       this.state.replace({
         activeTab: "global",
         workspacePath: null,
         tasks: [],
         runs: [],
+        runsNextCursor: null,
+        runsTaskFilter: null,
+        runsGeneration: this.state.snapshot.runsGeneration + 1,
+        runsLoadingOlder: false,
+        runsError: null,
         capability: DEFAULT_CAPABILITY,
         executionProfile: null,
         busy: false,
@@ -657,14 +721,23 @@ export class WorkspaceScheduledPromptsApp {
       workspacePath,
       error: null,
       successMessage: null,
-      highlightedTaskId: null
+      highlightedTaskId: null,
+      ...(mode === "switch"
+        ? {
+            runs: [],
+            runsNextCursor: null,
+            runsTaskFilter: null,
+            runsGeneration: this.state.snapshot.runsGeneration + 1,
+            runsLoadingOlder: false,
+            runsError: null
+          }
+        : {})
     });
     try {
       const payload = await this.rpc.loadWorkspaceState(workspacePath);
       this.state.patch({
         workspacePath,
         tasks: payload.tasks,
-        runs: payload.runs,
         capability: payload.capability,
         executionProfile: payload.executionProfile,
         busy: false,
@@ -672,6 +745,7 @@ export class WorkspaceScheduledPromptsApp {
         successMessage: null,
         highlightedTaskId: null
       });
+      await this.reloadRuns(workspacePath, mode === "switch" ? 100 : this.refreshLimit());
       return true;
     } catch (error) {
       this.state.patch({
@@ -694,7 +768,7 @@ export class WorkspaceScheduledPromptsApp {
     successMessage: string,
     highlightedTaskId: string | null
   ): Promise<void> {
-    const refreshed = await this.loadFromContext(workspacePath);
+    const refreshed = await this.loadFromContext(workspacePath, "refresh");
     await this.loadGlobalDashboard(true);
     if (!refreshed) {
       return;
@@ -977,13 +1051,7 @@ export class WorkspaceScheduledPromptsApp {
           if (!workspacePath) {
             return;
           }
-          void this.rpc.runNow(taskId, workspacePath).then((response) => {
-            this.state.patch({
-              runs: [response.run, ...this.state.snapshot.runs.filter((run) => run.id !== response.run.id)],
-              error: null
-            });
-            return this.reconcileWorkspaceState(workspacePath, "Manual run finished.", taskId);
-          }).catch((error) => {
+          void this.rpc.runNow(taskId, workspacePath).then(() => this.reconcileWorkspaceState(workspacePath, "Manual run finished.", taskId)).catch((error) => {
             this.state.patch({
               error: error instanceof Error ? error.message : "Failed to start manual run.",
               successMessage: null
@@ -998,19 +1066,34 @@ export class WorkspaceScheduledPromptsApp {
         if (!workspacePath) {
           return;
         }
-        void this.rpc.retryRun(runId, workspacePath).then((response) => {
-          this.state.patch({
-            runs: [response.run, ...this.state.snapshot.runs.filter((run) => run.id !== response.run.id)],
-            error: null
+        void this.rpc.retryRun(runId, workspacePath)
+          .then(() => this.reconcileWorkspaceState(workspacePath, "Retry finished.", null))
+          .catch((error) => {
+            this.state.patch({
+              error: error instanceof Error ? error.message : "Failed to retry run.",
+              successMessage: null
+            });
           });
-          return this.reconcileWorkspaceState(workspacePath, "Retry finished.", null);
-        }).catch((error) => {
-          this.state.patch({
-            error: error instanceof Error ? error.message : "Failed to retry run.",
-            successMessage: null
-          });
-        });
+      },
+      onLoadOlder: () => {
+        void this.loadOlderRuns();
+      },
+      onSelectTask: (taskId) => {
+        void this.setRunsTaskFilter(taskId);
+      },
+      onLoadEvents: (runId) => {
+        const workspacePath = this.state.snapshot.workspacePath;
+        if (!workspacePath) {
+          return Promise.reject(new Error("No workspace selected."));
+        }
+        return this.rpc.listRunEvents(runId, workspacePath);
       }
+    }, {
+      tasks: snapshot.tasks.map((task) => ({ id: task.id, name: task.name })),
+      taskFilter: snapshot.runsTaskFilter,
+      hasMore: Boolean(snapshot.runsNextCursor),
+      loadingOlder: snapshot.runsLoadingOlder,
+      error: snapshot.runsError
     }));
     main.append(left, right);
     root.append(main);

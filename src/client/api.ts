@@ -5,6 +5,8 @@ import type {
   GlobalDashboardActionResponse,
   GlobalDashboardResponse,
   GlobalDashboardRetryRequest,
+  ListRunsResponse,
+  RunEventsResponse,
   RunResponse,
   TaskResponse,
   UpdateTaskRequest,
@@ -101,6 +103,30 @@ export class PluginRpcClient {
       "POST",
       `/v1/global-jobs/${encodeURIComponent(workspaceKey)}/${encodeURIComponent(taskId)}/actions/retry`,
       request
+    );
+  }
+
+  listRuns(
+    workspacePath: string,
+    options: { limit?: number; before?: string | null; taskId?: string | null } = {}
+  ): Promise<ListRunsResponse> {
+    const params = new URLSearchParams({ workspacePath });
+    if (options.limit !== undefined) {
+      params.set("limit", String(options.limit));
+    }
+    if (options.before) {
+      params.set("before", options.before);
+    }
+    if (options.taskId) {
+      params.set("taskId", options.taskId);
+    }
+    return this.api.rpc("GET", `/v1/runs?${params.toString()}`);
+  }
+
+  listRunEvents(runId: string, workspacePath: string): Promise<RunEventsResponse> {
+    return this.api.rpc(
+      "GET",
+      `/v1/runs/${encodeURIComponent(runId)}/events?workspacePath=${encodeURIComponent(workspacePath)}`
     );
   }
 }
