@@ -15,6 +15,16 @@ import { validateRecurrenceDefinition } from "./recurrence.js";
 export const STORAGE_VERSION = 2;
 const DATA_DIR_NAME = ".cloudcli-workspace-scheduled-prompts";
 
+export const FROZEN_WORKSPACE_WARNING =
+  "Run history import failed; it will be retried at the next start. See the plugin log.";
+
+let frozenWorkspaceKeys: ReadonlySet<string> = new Set();
+
+/** Derived workspace keys whose v0.2.0 import failed at startup (design §3 "Migration"). */
+export function setFrozenWorkspaceKeys(keys: ReadonlySet<string>): void {
+  frozenWorkspaceKeys = new Set(keys);
+}
+
 export interface WorkspaceLedgerRecord extends WorkspaceAvailabilityState {
   ledger: WorkspaceLedger | null;
 }
@@ -160,7 +170,8 @@ function coerceLedgerShape(raw: unknown, fallbackWorkspaceKey: string): { ledger
       updatedAt:
         typeof record.updatedAt === "string" && record.updatedAt.trim()
           ? record.updatedAt.trim()
-          : new Date().toISOString()
+          : new Date().toISOString(),
+      ...(typeof record.migratedFrom === "string" ? { migratedFrom: record.migratedFrom } : {})
     },
     warning: repairNotes.length ? repairNotes.join(" ") : null
   };
@@ -183,16 +194,18 @@ async function inspectLedgerFile(filePath: string, fileName: string): Promise<Wo
     const { ledger, warning } = coerceLedgerShape(raw, fallbackWorkspaceKey);
     const workspaceReadable = await workspacePathIsReadable(ledger.workspacePath);
     const workspaceLabel = projectNameFromWorkspacePath(ledger.workspacePath);
+    const frozen = frozenWorkspaceKeys.has(workspaceKeyFromPath(ledger.workspacePath));
     const warningParts = [
       warning,
-      workspaceReadable ? null : "Workspace path is unavailable."
+      workspaceReadable ? null : "Workspace path is unavailable.",
+      frozen ? FROZEN_WORKSPACE_WARNING : null
     ].filter((value): value is string => Boolean(value));
 
     return {
       workspaceKey: ledger.workspaceKey,
       workspacePath: ledger.workspacePath,
       workspaceLabel,
-      status: warningParts.length ? (workspaceReadable ? "partial" : "unavailable") : "available",
+      status: frozen ? "unavailable" : warningParts.length ? (workspaceReadable ? "partial" : "unavailable") : "available",
       jobCount: ledger.tasks.length,
       warning: warningParts.length ? warningParts.join(" ") : null,
       ledger

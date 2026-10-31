@@ -104,11 +104,20 @@ export class SchedulerService {
 
   constructor(
     private readonly executionAdapter: LocalExecutionAdapter,
-    private readonly runStore: RunStore
+    private readonly runStore: RunStore,
+    private readonly frozenKeys: ReadonlySet<string> = new Set()
   ) {}
+
+  /** A workspace whose v0.2.0 import failed is frozen until a later start imports it (design §3). */
+  private assertNotFrozen(workspacePath: string): void {
+    if (this.frozenKeys.has(workspaceKeyFromPath(workspacePath))) {
+      throw new HttpError(409, "Run history import pending");
+    }
+  }
 
   /** Per-workspace lock; reloads the ledger, runs fn, saves only if fn changed it. Not re-entrant. */
   private async mutateLedger<T>(workspacePath: string, fn: (ledger: WorkspaceLedger) => T | Promise<T>): Promise<T> {
+    this.assertNotFrozen(workspacePath);
     const lockKey = workspaceKeyFromPath(workspacePath);
     const previous = this.ledgerLocks.get(lockKey) ?? Promise.resolve();
     let release!: () => void;
@@ -328,6 +337,7 @@ export class SchedulerService {
   }
 
   async createManualRun(taskId: string, workspacePath: string): Promise<ScheduledRun> {
+    this.assertNotFrozen(workspacePath);
     const ledger = await loadWorkspaceLedger(workspacePath);
     const task = ledger.tasks.find((entry) => entry.id === taskId);
     if (!task) {
@@ -337,6 +347,7 @@ export class SchedulerService {
   }
 
   async retryRun(runId: string, workspacePath: string): Promise<ScheduledRun> {
+    this.assertNotFrozen(workspacePath);
     const ledger = await loadWorkspaceLedger(workspacePath);
     const existing = this.runStore.getRun(runId);
     if (!existing || existing.workspaceKey !== workspaceKeyFromPath(ledger.workspacePath)) {
@@ -397,6 +408,9 @@ export class SchedulerService {
     const ledgers = await listWorkspaceLedgers();
     for (const snapshot of ledgers) {
       const workspaceKey = workspaceKeyFromPath(snapshot.workspacePath);
+      if (this.frozenKeys.has(workspaceKey)) {
+        continue;
+      }
       try {
         await this.tickWorkspace(snapshot);
       } catch (error) {

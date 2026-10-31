@@ -120,6 +120,7 @@ export interface WorkspaceLedger {
   tasks: WorkspaceTask[];
   executionProfile: ExecutionProfile | null;
   updatedAt: string;
+  migratedFrom?: string;
 }
 
 export interface WorkspaceAvailabilityState {
