@@ -5,7 +5,7 @@
   "description": "CloudCLI plugin for workspace-scoped scheduled prompts.",
   "type": "module",
   "engines": {
-    "node": ">=18"
+    "node": ">=22.13 <23 || >=23.4"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json && esbuild src/index.ts --bundle --format=esm --platform=browser --outfile=dist/index.js",
