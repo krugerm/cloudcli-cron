@@ -87,7 +87,7 @@ A user upgrading from v0.2.0 keeps all runs previously stored in the workspace J
 
 **Acceptance Scenarios**:
 
-1. **Given** v0.2.0 workspace files with runs, **When** the new version starts, **Then** every valid run appears in Recent Runs with the same status, times and summary, and each original file is kept as `<key>.v1.json.bak`.
+1. **Given** v0.2.0 workspace files with runs, **When** the new version starts, **Then** every valid run appears in Recent Runs with the same status, times and summary, and each original file is kept as `<original name>.v1.json.bak`.
 2. **Given** the import was interrupted, **When** the server starts again, **Then** the import completes with no duplicated runs.
 
 ### Edge Cases
@@ -101,7 +101,8 @@ A user upgrading from v0.2.0 keeps all runs previously stored in the workspace J
 - A run with an unknown status in a v0.2.0 file: it is skipped and counted; the rest of the file imports.
 - `runs.db` cannot be opened or is from a newer plugin version: the plugin server stops at startup with the file path and reason.
 - Node older than 22.13, or 23.0–23.3: the plugin server stops at startup with "Scheduled Prompt needs Node 22.13+ (found X)".
-- Several runs share the same scheduled time: paging neither skips nor repeats them.
+- Runs are recorded out of schedule order (catch-up after downtime, delayed runs): runs are listed newest-recorded first, so paging neither skips nor repeats them.
+- A task's prompt or name is edited while an occurrence is due: the occurrence still runs.
 - A workspace or task is deleted: its events remain in `runs.db`.
 
 ## Requirements *(mandatory)*
@@ -146,7 +147,7 @@ A user upgrading from v0.2.0 keeps all runs previously stored in the workspace J
 
 ## Assumptions
 
-- Rolling back to v0.2.0 requires restoring the `.v1.json.bak` files; runs recorded after the upgrade stay only in `runs.db`.
+- Rolling back to v0.2.0 requires restoring the `.v1.json.bak` files; task edits made after the upgrade are lost, and runs recorded after the upgrade stay only in `runs.db`.
 - The plugin server runs on the `node` found on the PATH, as started by CloudCLI, and users of CloudCLI run Node 22 (CloudCLI targets Node 22).
 - Several KB of storage per run (captured output and the prompt) is acceptable; an every-minute task grows `runs.db` by roughly 2–3 GB per year. Retention is a likely follow-up feature.
 - Statuses `scheduled` and `canceled` are never produced today and need no event type.
