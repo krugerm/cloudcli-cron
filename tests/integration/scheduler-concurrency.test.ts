@@ -124,7 +124,7 @@ describe("scheduler concurrency", () => {
     const otherPath = path.join(tempHome, "other");
     await mkdir(otherPath, { recursive: true });
     const a = await scheduler.createTask({ workspacePath, name: "A", prompt: "A", recurrence: daily });
-    await makeDue(a.id);
+    const dueA = await makeDue(a.id);
     const b = await scheduler.createTask({ workspacePath: otherPath, name: "B", prompt: "B", recurrence: daily });
     const ledgerB = await loadWorkspaceLedger(otherPath);
     ledgerB.tasks.find((entry) => entry.id === b.id)!.nextRunAt = new Date(Date.now() - 10_000).toISOString();
@@ -142,7 +142,7 @@ describe("scheduler concurrency", () => {
     await expect(scheduler.tickWithoutDispatcher()).resolves.toBeUndefined();
     expect(store.listRuns(workspaceKeyFromPath(otherPath)).runs).toHaveLength(1);
     expect(stderr.mock.calls.some(([line]) => String(line).includes("disk full"))).toBe(true);
-    expect((await loadWorkspaceLedger(workspacePath)).tasks[0]?.nextRunAt).not.toBeNull();
+    expect((await loadWorkspaceLedger(workspacePath)).tasks[0]?.nextRunAt).toBe(dueA);
   });
 
   it.skipIf(typeof process.getuid === "function" && process.getuid() === 0)(
@@ -163,6 +163,31 @@ describe("scheduler concurrency", () => {
       await scheduler.tickWithoutDispatcher();
       expect(store.listRuns(key).runs).toHaveLength(1);
       expect((await loadWorkspaceLedger(workspacePath)).tasks.find((entry) => entry.id === task.id)?.nextRunAt! > new Date().toISOString()).toBe(true);
+    }
+  );
+
+  it.skipIf(typeof process.getuid === "function" && process.getuid() === 0)(
+    "keeps the original save error when recording the save failure also fails",
+    async () => {
+      await slowTask(10);
+      const dataDir = path.join(tempHome, ".cloudcli-workspace-scheduled-prompts");
+      const original = store.appendEvent.bind(store);
+      vi.spyOn(store, "appendEvent").mockImplementation((event) => {
+        if (event.type === "failed" && event.summary === SAVE_FAILED_SUMMARY) {
+          throw new Error("second failure");
+        }
+        original(event);
+      });
+      const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+      await chmod(dataDir, 0o500);
+      try {
+        await expect(scheduler.tickWithoutDispatcher()).resolves.toBeUndefined();
+      } finally {
+        await chmod(dataDir, 0o700);
+      }
+      const lines = stderr.mock.calls.map(([line]) => String(line));
+      expect(lines.some((line) => line.includes("EACCES"))).toBe(true);
+      expect(lines.some((line) => line.includes("second failure"))).toBe(true);
     }
   );
 
@@ -221,6 +246,33 @@ describe("scheduler concurrency", () => {
     const run = await scheduler.createManualRun(other.id, otherPath);
     await expect(scheduler.retryRun(run.id, workspacePath)).rejects.toMatchObject({ status: 404, message: "Run not found" });
     await expect(scheduler.retryRun(run.id, workspacePath)).rejects.toBeInstanceOf(HttpError);
+  });
+
+  it("derives a task's lastRunStatus from the run key of the ledger's own workspacePath, not the request path", async () => {
+    const otherPath = path.join(tempHome, "other");
+    await mkdir(otherPath, { recursive: true });
+    const task = await scheduler.createTask({ workspacePath, name: "T", prompt: "P", recurrence: daily });
+    const file = path.join(tempHome, ".cloudcli-workspace-scheduled-prompts", `${key}.json`);
+    const raw = JSON.parse(await readFile(file, "utf8"));
+    raw.workspacePath = otherPath;
+    await writeFile(file, JSON.stringify(raw), "utf8");
+    const at = new Date().toISOString();
+    store.appendEvent({
+      runId: "run-b",
+      workspaceKey: workspaceKeyFromPath(otherPath),
+      taskId: task.id,
+      occurrenceKey: `${task.id}:manual:run-b`,
+      scheduledFor: at,
+      source: "manual",
+      retryOfRunId: null,
+      type: "failed",
+      at,
+      summary: "boom",
+      failureReason: "boom"
+    });
+
+    const updated = await scheduler.updateTask(task.id, { workspacePath, prompt: "Changed" });
+    expect(updated.lastRunStatus).toBe("failed");
   });
 
   // Review Focus 3: unknown fields in a hand-edited ledger survive locked writes

@@ -141,6 +141,11 @@ export class SchedulerService {
     }));
   }
 
+  /** A response copy keyed by the loaded ledger's own workspacePath (design §2 Workspace key rule). */
+  private derivedCopy(ledger: WorkspaceLedger, task: WorkspaceTask): WorkspaceTask {
+    return this.withDerivedStatus(workspaceKeyFromPath(ledger.workspacePath), [task])[0]!;
+  }
+
   private requireRun(runId: string): ScheduledRun {
     const run = this.runStore.getRun(runId);
     if (!run) {
@@ -191,7 +196,7 @@ export class SchedulerService {
 
   async createTask(request: CreateTaskRequest): Promise<WorkspaceTask> {
     validateRecurrenceDefinition(request.recurrence);
-    const task = await this.mutateLedger(request.workspacePath, (ledger) => {
+    return this.mutateLedger(request.workspacePath, (ledger) => {
       const createdAt = nowIso();
       const created: WorkspaceTask = {
         id: randomUUID(),
@@ -209,14 +214,14 @@ export class SchedulerService {
       };
       created.nextRunAt = computeTaskNextRun(created, createdAt);
       ledger.tasks.push(created);
-      return { ...created };
+      return this.derivedCopy(ledger, created);
     });
-    return this.withDerivedStatus(workspaceKeyFromPath(request.workspacePath), [task])[0]!;
   }
 
   async updateTask(taskId: string, request: UpdateTaskRequest): Promise<WorkspaceTask> {
-    const task = await this.mutateLedger(request.workspacePath, (ledger) => this.updateTaskLocked(ledger, taskId, request));
-    return this.withDerivedStatus(workspaceKeyFromPath(request.workspacePath), [task])[0]!;
+    return this.mutateLedger(request.workspacePath, (ledger) =>
+      this.derivedCopy(ledger, this.updateTaskLocked(ledger, taskId, request))
+    );
   }
 
   /** nextRunAt rules (design §2 "nextRunAt on task edits"); the first matching row wins. */
@@ -269,7 +274,7 @@ export class SchedulerService {
   }
 
   async duplicateTask(taskId: string, workspacePath: string): Promise<WorkspaceTask> {
-    const copy = await this.mutateLedger(workspacePath, (ledger) => {
+    return this.mutateLedger(workspacePath, (ledger) => {
       const source = ledger.tasks.find((task) => task.id === taskId);
       if (!source) {
         throw new Error("Task not found");
@@ -287,9 +292,8 @@ export class SchedulerService {
       duplicate.recurrenceSummary = formatRecurrenceSummary(duplicate.recurrence);
       duplicate.nextRunAt = computeTaskNextRun(duplicate, createdAt);
       ledger.tasks.push(duplicate);
-      return { ...duplicate };
+      return this.derivedCopy(ledger, duplicate);
     });
-    return this.withDerivedStatus(workspaceKeyFromPath(workspacePath), [copy])[0]!;
   }
 
   async saveExecutionProfile(request: ExecutionProfileRequest): Promise<ExecutionProfile> {
@@ -454,13 +458,17 @@ export class SchedulerService {
         this.inFlightOccurrences.delete(claim.addedKey);
       }
       if (claim.started) {
-        this.runStore.appendEvent({
-          ...claim.started.base,
-          type: "failed",
-          at: nowIso(),
-          summary: SAVE_FAILED_SUMMARY,
-          failureReason: SAVE_FAILED_SUMMARY
-        });
+        try {
+          this.runStore.appendEvent({
+            ...claim.started.base,
+            type: "failed",
+            at: nowIso(),
+            summary: SAVE_FAILED_SUMMARY,
+            failureReason: SAVE_FAILED_SUMMARY
+          });
+        } catch (appendError) {
+          logTickError(appendError, claim.started.base.workspaceKey);
+        }
       }
       throw error;
     }
