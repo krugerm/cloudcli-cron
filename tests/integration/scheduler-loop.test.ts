@@ -51,10 +51,10 @@ describe("scheduler service integration", () => {
     expect(task.recurrenceSummary).toContain("Daily at 09:00");
     expect(task.nextRunAt).toBeTruthy();
 
-    const state = await scheduler.loadWorkspaceState(workspacePath, {
+    const state = await scheduler.loadWorkspaceState(workspacePath, () => ({
       status: "needs_config",
       message: "not configured"
-    });
+    }));
     expect(state.tasks).toHaveLength(1);
     expect(state.tasks[0]?.name).toBe("Morning summary");
   });
@@ -122,7 +122,7 @@ describe("scheduler service integration", () => {
     expect(runsOf()).toHaveLength(1);
     expect(runsOf()[0]?.status).toBe("succeeded");
     expect(runsOf()[0]?.outcomeSummary).toContain("stdin:Summarize the workspace.");
-    const derived = await scheduler.loadWorkspaceState(workspacePath, { status: "ready", message: "ok" });
+    const derived = await scheduler.loadWorkspaceState(workspacePath, () => ({ status: "ready", message: "ok" }));
     expect(derived.tasks[0]?.lastRunStatus).toBe("succeeded");
 
     await scheduler.tickWithoutDispatcher();

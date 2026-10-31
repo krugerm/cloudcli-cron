@@ -1,7 +1,7 @@
 import path from "node:path";
 import { LocalExecutionAdapter } from "./server/execution-adapter.js";
 import { startHttpServer } from "./server/http.js";
-import { SchedulerService } from "./server/scheduler.js";
+import { logTickError, SchedulerService } from "./server/scheduler.js";
 import { ensureLedgerDataDir, ledgerDataRoot } from "./server/storage.js";
 
 async function main(): Promise<void> {
@@ -16,7 +16,7 @@ async function main(): Promise<void> {
   }
 
   setInterval(() => {
-    void scheduler.tickWithoutDispatcher();
+    scheduler.tickWithoutDispatcher().catch((error: unknown) => logTickError(error));
   }, 30_000).unref();
 
   process.stdout.write(`${JSON.stringify({ ready: true, port: address.port })}\n`);

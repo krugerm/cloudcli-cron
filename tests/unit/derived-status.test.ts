@@ -48,7 +48,7 @@ describe("derived lastRunStatus", () => {
     expect(task.lastRunStatus).toBeNull();
     await scheduler.createManualRun(task.id, workspacePath);
 
-    const state = await scheduler.loadWorkspaceState(workspacePath, capability());
+    const state = await scheduler.loadWorkspaceState(workspacePath, capability);
     expect(state.tasks[0]?.lastRunStatus).toBe("failed");
 
     const file = JSON.parse(await readFile(path.join(tempHome, ".cloudcli-workspace-scheduled-prompts", `${workspaceKeyFromPath(workspacePath)}.json`), "utf8"));
@@ -60,10 +60,10 @@ describe("derived lastRunStatus", () => {
     const ledger = await loadWorkspaceLedger(workspacePath);
     ledger.tasks[0]!.legacyLastRunStatus = "succeeded";
     await saveWorkspaceLedger(ledger);
-    expect((await scheduler.loadWorkspaceState(workspacePath, capability())).tasks[0]?.lastRunStatus).toBe("succeeded");
+    expect((await scheduler.loadWorkspaceState(workspacePath, capability)).tasks[0]?.lastRunStatus).toBe("succeeded");
 
     await scheduler.createManualRun(task.id, workspacePath);
-    expect((await scheduler.loadWorkspaceState(workspacePath, capability())).tasks[0]?.lastRunStatus).toBe("failed");
+    expect((await scheduler.loadWorkspaceState(workspacePath, capability)).tasks[0]?.lastRunStatus).toBe("failed");
   });
 
   it("does not copy legacyLastRunStatus into a duplicate", async () => {

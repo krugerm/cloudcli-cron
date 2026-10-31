@@ -79,10 +79,10 @@ describe("performance fixtures", () => {
 
     const scheduler = new SchedulerService(new LocalExecutionAdapter(), store);
     const startedAt = performance.now();
-    const state = await scheduler.loadWorkspaceState(workspacePath, {
+    const state = await scheduler.loadWorkspaceState(workspacePath, () => ({
       status: "needs_config",
       message: "Configure a local execution command to enable automatic prompt runs."
-    });
+    }));
     const durationMs = performance.now() - startedAt;
 
     expect(state.tasks).toHaveLength(100);

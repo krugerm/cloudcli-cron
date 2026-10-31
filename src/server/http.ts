@@ -83,9 +83,9 @@ export function createHttpHandler(scheduler: SchedulerService, runStore: RunStor
         if (!workspacePath) {
           throw new Error("workspacePath is required");
         }
-        const ledger = await scheduler.refreshWorkspaceLedger(workspacePath);
-        const capability = createCapability(request.headers, ledger.executionProfile);
-        const payload: WorkspaceStateResponse = await scheduler.loadWorkspaceState(workspacePath, capability);
+        const payload: WorkspaceStateResponse = await scheduler.loadWorkspaceState(workspacePath, (profile) =>
+          createCapability(request.headers, profile)
+        );
         json(response, 200, payload);
         return;
       }
