@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { RunStore } from "../../src/server/run-store.js";
 import { startPluginServer } from "../../src/server/startup.js";
-import { setFrozenWorkspaceKeys } from "../../src/server/storage.js";
+import { listWorkspaceLedgerRecords, setFrozenWorkspaceKeys } from "../../src/server/storage.js";
 import { workspaceKeyFromPath } from "../../src/shared/workspace.js";
 
 describe("startPluginServer", () => {
@@ -102,6 +102,72 @@ describe("startPluginServer", () => {
     try {
       const response = await fetch(`http://127.0.0.1:${handle.port}/v1/runs?workspacePath=${encodeURIComponent(workspacePath)}`);
       expect((await response.json()).runs.map((run: { id: string }) => run.id)).toEqual(["old"]);
+    } finally {
+      await handle.stop();
+    }
+  });
+
+  async function writeLegacyLedger(workspacePath: string, runs: unknown[]): Promise<string> {
+    const key = workspaceKeyFromPath(workspacePath);
+    await writeFile(
+      path.join(dataDir, `${key}.json`),
+      JSON.stringify({ version: 1, workspaceKey: key, workspacePath, tasks: [], runs, executionProfile: null, updatedAt: "2026-04-01T00:00:00.000Z" }),
+      "utf8"
+    );
+    return key;
+  }
+
+  function legacyRun(key: string, status: string) {
+    return {
+      id: "old",
+      occurrenceKey: "t:x",
+      taskId: "t",
+      workspaceKey: key,
+      scheduledFor: "2026-04-27T07:00:00.000Z",
+      startedAt: "2026-04-27T07:00:01.000Z",
+      finishedAt: null,
+      status,
+      outcomeSummary: "x",
+      failureReason: null,
+      retryOfRunId: null,
+      executionRequest: null
+    };
+  }
+
+  it("freezes a workspace whose import failed: unavailable in listings and mutations answer 409", async () => {
+    const workspacePath = path.join(tempHome, "frozen");
+    await mkdir(workspacePath, { recursive: true });
+    const key = workspaceKeyFromPath(workspacePath);
+    await writeLegacyLedger(workspacePath, [legacyRun(key, "failed")]);
+    // A directory at the backup's temp path makes the backup step, and so the import, fail.
+    await mkdir(path.join(dataDir, `${key}.v1.json.bak.tmp`));
+    vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+
+    const handle = await startPluginServer({ tickIntervalMs: 3_600_000 });
+    try {
+      const records = await listWorkspaceLedgerRecords();
+      expect(records.find((record) => record.workspaceKey === key)).toMatchObject({ status: "unavailable" });
+      const base = `http://127.0.0.1:${handle.port}`;
+      const state = await fetch(`${base}/v1/workspace-state?workspacePath=${encodeURIComponent(workspacePath)}`);
+      expect(state.status).toBe(409);
+      expect(JSON.stringify(await state.json())).toContain("Run history import pending");
+    } finally {
+      await handle.stop();
+    }
+  });
+
+  // Migration closes a legacy "running" run itself, so recovering first would give the same
+  // outcome here; this pins that the run is closed exactly once, never twice.
+  it("closes a migrated running run exactly once", async () => {
+    const workspacePath = path.join(tempHome, "running");
+    await mkdir(workspacePath, { recursive: true });
+    const key = workspaceKeyFromPath(workspacePath);
+    await writeLegacyLedger(workspacePath, [legacyRun(key, "running")]);
+    const handle = await startPluginServer({ tickIntervalMs: 3_600_000, now: () => "2026-10-31T00:00:00.000Z" });
+    try {
+      const events = handle.runStore.listEvents("old");
+      expect(events.map((event) => event.type)).toEqual(["started", "failed"]);
+      expect(events.filter((event) => event.source === "recovery")).toHaveLength(1);
     } finally {
       await handle.stop();
     }
