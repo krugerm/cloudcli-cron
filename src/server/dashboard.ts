@@ -11,18 +11,19 @@ import type {
   WorkspaceTask
 } from "../shared/model.js";
 import { workspaceKeyFromPath } from "../shared/workspace.js";
+import { deriveLastRunStatus } from "./run-fold.js";
 import type { RunStore, TaskRunSummary } from "./run-store.js";
 import { listWorkspaceLedgerRecords, type WorkspaceLedgerRecord } from "./storage.js";
 
 const EMPTY_SUMMARY: TaskRunSummary = { latest: null, latestFinished: null };
 
 function storedTaskStatus(task: WorkspaceTask): GlobalJobRunStatus {
-  switch (task.lastRunStatus) {
+  switch (task.legacyLastRunStatus) {
     case "running":
     case "succeeded":
     case "failed":
     case "missed":
-      return task.lastRunStatus;
+      return task.legacyLastRunStatus;
     default:
       return "never_run";
   }
@@ -286,12 +287,12 @@ export async function resolveGlobalTask(
 
   return {
     workspacePath: workspace.ledger.workspacePath,
-    task,
+    task: { ...task, lastRunStatus: deriveLastRunStatus(task, summary.latest) },
     latestActionableRunId
   };
 }
 
-export async function readGlobalTaskState(workspaceKey: string, taskId: string): Promise<WorkspaceTask> {
+export async function readGlobalTaskState(workspaceKey: string, taskId: string, runStore: RunStore): Promise<WorkspaceTask> {
   const workspace = (await listWorkspaceLedgerRecords()).find((entry) => entry.workspaceKey === workspaceKey);
   if (!workspace?.ledger) {
     throw new Error("Workspace not found");
@@ -302,5 +303,7 @@ export async function readGlobalTaskState(workspaceKey: string, taskId: string):
     throw new Error("Task not found");
   }
 
-  return task;
+  const summary =
+    runStore.taskRunSummaries(workspaceKeyFromPath(workspace.ledger.workspacePath), [taskId]).get(taskId) ?? EMPTY_SUMMARY;
+  return { ...task, lastRunStatus: deriveLastRunStatus(task, summary.latest) };
 }

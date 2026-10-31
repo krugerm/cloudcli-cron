@@ -122,7 +122,8 @@ describe("scheduler service integration", () => {
     expect(runsOf()).toHaveLength(1);
     expect(runsOf()[0]?.status).toBe("succeeded");
     expect(runsOf()[0]?.outcomeSummary).toContain("stdin:Summarize the workspace.");
-    expect(updated.tasks[0]?.lastRunStatus).toBe("succeeded");
+    const derived = await scheduler.loadWorkspaceState(workspacePath, { status: "ready", message: "ok" });
+    expect(derived.tasks[0]?.lastRunStatus).toBe("succeeded");
 
     await scheduler.tickWithoutDispatcher();
     expect(runsOf()).toHaveLength(1);

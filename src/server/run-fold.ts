@@ -1,4 +1,4 @@
-import type { RunEvent, ScheduledRun } from "../shared/model.js";
+import type { RunEvent, RunStatus, ScheduledRun, WorkspaceTask } from "../shared/model.js";
 
 export const STARTED_SUMMARY = "Command started.";
 export const RECOVERY_SUMMARY = "Plugin server restarted while this run was in progress.";
@@ -29,4 +29,8 @@ export function foldRun(events: RunEvent[]): ScheduledRun {
     retryOfRunId: first.retryOfRunId ?? null,
     executionRequest: started?.executionRequest ?? null
   };
+}
+
+export function deriveLastRunStatus(task: WorkspaceTask, latest: ScheduledRun | null | undefined): RunStatus | null {
+  return latest?.status ?? task.legacyLastRunStatus ?? null;
 }

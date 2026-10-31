@@ -1,5 +1,6 @@
 export type ScheduleType = "one_time" | "daily" | "weekdays" | "weekly" | "monthly";
-export type RunStatus = "scheduled" | "running" | "succeeded" | "failed" | "missed" | "canceled";
+export const RUN_STATUSES = ["scheduled", "running", "succeeded", "failed", "missed", "canceled"] as const;
+export type RunStatus = (typeof RUN_STATUSES)[number];
 export type ExecutionCapabilityStatus = "ready" | "needs_config" | "invalid" | "unsupported";
 export type MonthlyOverflowPolicy = "clamp_to_last_day";
 export type WorkspaceAvailability = "available" | "partial" | "unavailable";
@@ -76,6 +77,7 @@ export interface WorkspaceTask {
   enabled: boolean;
   nextRunAt: string | null;
   lastRunStatus: RunStatus | null;
+  legacyLastRunStatus?: RunStatus | null;
   createdAt: string;
   updatedAt: string;
 }

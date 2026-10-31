@@ -22,7 +22,7 @@ import {
 } from "./recurrence.js";
 import { LocalExecutionAdapter } from "./execution-adapter.js";
 import { HttpError } from "./http-error.js";
-import { STARTED_SUMMARY } from "./run-fold.js";
+import { deriveLastRunStatus, STARTED_SUMMARY } from "./run-fold.js";
 import type { ListRunsOptions, RunPage, RunStore } from "./run-store.js";
 import { createExecutionProfile, normalizeExecutionProfile, resolveExecutionCapability } from "./settings.js";
 import { listWorkspaceLedgers, loadWorkspaceLedger, saveWorkspaceLedger } from "./storage.js";
@@ -58,13 +58,21 @@ export class SchedulerService {
     private readonly runStore: RunStore
   ) {}
 
+  private withDerivedStatus(workspaceKey: string, tasks: WorkspaceTask[]): WorkspaceTask[] {
+    const summaries = this.runStore.taskRunSummaries(workspaceKey, tasks.map((task) => task.id));
+    return tasks.map((task) => ({
+      ...task,
+      lastRunStatus: deriveLastRunStatus(task, summaries.get(task.id)?.latest)
+    }));
+  }
+
   async loadWorkspaceState(workspacePath: string, capability: ExecutionCapability): Promise<WorkspaceStateResponse> {
     const ledger = await this.refreshWorkspaceLedger(workspacePath);
     const page = this.runStore.listRuns(workspaceKeyFromPath(ledger.workspacePath));
     return {
       capability,
       executionProfile: ledger.executionProfile,
-      tasks: ledger.tasks,
+      tasks: this.withDerivedStatus(workspaceKeyFromPath(ledger.workspacePath), ledger.tasks),
       runs: page.runs,
       runsNextCursor: page.nextCursor
     };
@@ -108,7 +116,7 @@ export class SchedulerService {
 
     ledger.tasks.push(task);
     await saveWorkspaceLedger(ledger);
-    return task;
+    return this.withDerivedStatus(workspaceKeyFromPath(ledger.workspacePath), [task])[0]!;
   }
 
   async updateTask(taskId: string, request: UpdateTaskRequest): Promise<WorkspaceTask> {
@@ -136,7 +144,7 @@ export class SchedulerService {
     const updated = taskWithComputedFields(task, task.updatedAt);
     Object.assign(task, updated);
     await saveWorkspaceLedger(ledger);
-    return task;
+    return this.withDerivedStatus(workspaceKeyFromPath(ledger.workspacePath), [task])[0]!;
   }
 
   async deleteTask(taskId: string, workspacePath: string): Promise<void> {
@@ -172,9 +180,10 @@ export class SchedulerService {
       nowIso()
     );
 
+    delete copy.legacyLastRunStatus;
     ledger.tasks.push(copy);
     await saveWorkspaceLedger(ledger);
-    return copy;
+    return this.withDerivedStatus(workspaceKeyFromPath(ledger.workspacePath), [copy])[0]!;
   }
 
   async createManualRun(taskId: string, workspacePath: string): Promise<ScheduledRun> {
@@ -303,7 +312,6 @@ export class SchedulerService {
       summary: reason,
       failureReason: reason
     });
-    task.lastRunStatus = "missed";
     task.nextRunAt = computeTaskNextRun(task, scheduledFor);
   }
 
@@ -338,7 +346,6 @@ export class SchedulerService {
         ? `Manual execution could not start. ${capability.message}`
         : capability.message;
       this.runStore.appendEvent({ ...base, type: blockedStatus, at: nowIso(), summary: blockedSummary, failureReason: blockedSummary });
-      task.lastRunStatus = blockedStatus;
       if (!options?.manual) {
         task.nextRunAt = computeTaskNextRun(task, scheduledFor);
       }
@@ -352,17 +359,14 @@ export class SchedulerService {
     if (!options?.manual) {
       task.nextRunAt = computeTaskNextRun(task, scheduledFor);
     }
-    task.lastRunStatus = "running";
     await saveWorkspaceLedger(ledger);
 
     try {
       const result = await this.executionAdapter.execute(task, profile, scheduledFor, executionRequest);
       this.runStore.appendEvent({ ...base, type: result.status, at: nowIso(), summary: result.outcomeSummary, failureReason: result.failureReason });
-      task.lastRunStatus = result.status;
     } catch (error) {
       const message = error instanceof Error ? error.message : "Local command execution failed.";
       this.runStore.appendEvent({ ...base, type: "failed", at: nowIso(), summary: message, failureReason: message });
-      task.lastRunStatus = "failed";
     } finally {
       this.inFlightOccurrences.delete(occurrenceKey);
     }

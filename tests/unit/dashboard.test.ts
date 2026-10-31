@@ -265,7 +265,7 @@ describe("global dashboard aggregation", () => {
     expect(snapshot.jobs[0]?.availableActions).toEqual(["run_now", "pause"]);
   });
 
-  it("falls back to the persisted task status when matching run history has been trimmed", async () => {
+  it("falls back to legacyLastRunStatus when the task has no runs", async () => {
     const workspacePath = path.join(tempHome, "workspace-trimmed-status");
     const workspaceKey = workspaceKeyFromPath(workspacePath);
     await mkdir(workspacePath, { recursive: true });
@@ -289,7 +289,8 @@ describe("global dashboard aggregation", () => {
           recurrenceSummary: "Daily at 09:00 (Europe/Paris)",
           enabled: true,
           nextRunAt: "2099-01-01T08:00:00.000Z",
-          lastRunStatus: "failed",
+          lastRunStatus: null,
+          legacyLastRunStatus: "failed",
           createdAt: "2026-04-27T08:00:00.000Z",
           updatedAt: "2026-04-27T08:00:00.000Z"
         }

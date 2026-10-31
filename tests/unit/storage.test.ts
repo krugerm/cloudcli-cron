@@ -52,6 +52,62 @@ describe("storage", () => {
     expect(reloaded.tasks[0]?.name).toBe("Morning summary");
   });
 
+  it("accepts a task with no lastRunStatus and no legacyLastRunStatus", async () => {
+    const ledger = await loadWorkspaceLedger("/tmp/project");
+    const now = new Date().toISOString();
+    const task = {
+      id: "task-bare",
+      workspaceKey: ledger.workspaceKey,
+      workspacePath: ledger.workspacePath,
+      name: "Bare",
+      prompt: "Go",
+      recurrence: { scheduleType: "daily", timezone: "Europe/Paris", localTime: "09:00" },
+      recurrenceSummary: "Daily at 09:00 (Europe/Paris)",
+      enabled: true,
+      nextRunAt: null,
+      createdAt: now,
+      updatedAt: now
+    };
+    const dataDir = path.join(tempHome, ".cloudcli-workspace-scheduled-prompts");
+    await mkdir(dataDir, { recursive: true });
+    await writeFile(
+      path.join(dataDir, `${ledger.workspaceKey}.json`),
+      JSON.stringify({ ...ledger, tasks: [task] }),
+      "utf8"
+    );
+
+    const record = (await listWorkspaceLedgerRecords()).find((entry) => entry.workspaceKey === ledger.workspaceKey);
+    expect(record?.warning).toBeNull();
+    expect(record?.ledger?.tasks).toHaveLength(1);
+    expect(record?.ledger?.tasks[0]?.lastRunStatus).toBeNull();
+    expect(record?.ledger?.tasks[0]?.legacyLastRunStatus).toBeUndefined();
+  });
+
+  it("keeps legacyLastRunStatus through a load/save round trip", async () => {
+    const ledger = await loadWorkspaceLedger("/tmp/project");
+    const now = new Date().toISOString();
+    ledger.tasks.push({
+      id: "task-legacy",
+      workspaceKey: ledger.workspaceKey,
+      workspacePath: ledger.workspacePath,
+      name: "Legacy",
+      prompt: "Go",
+      recurrence: { scheduleType: "daily", timezone: "Europe/Paris", localTime: "09:00" },
+      recurrenceSummary: "Daily at 09:00 (Europe/Paris)",
+      enabled: true,
+      nextRunAt: null,
+      lastRunStatus: null,
+      legacyLastRunStatus: "succeeded",
+      createdAt: now,
+      updatedAt: now
+    });
+    await saveWorkspaceLedger(ledger);
+    await saveWorkspaceLedger(await loadWorkspaceLedger("/tmp/project"));
+
+    const reloaded = await loadWorkspaceLedger("/tmp/project");
+    expect(reloaded.tasks[0]?.legacyLastRunStatus).toBe("succeeded");
+  });
+
   it("reports unreadable ledgers without dropping readable ones", async () => {
     const ledger = await loadWorkspaceLedger("/tmp/project");
     await saveWorkspaceLedger(ledger);

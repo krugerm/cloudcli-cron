@@ -56,9 +56,10 @@ function createCapability(headers: http.IncomingHttpHeaders, profile: ExecutionP
 
 async function loadTaskAfterAction(
   workspaceKey: string,
-  taskId: string
+  taskId: string,
+  runStore: RunStore
 ) {
-  return readGlobalTaskState(workspaceKey, taskId);
+  return readGlobalTaskState(workspaceKey, taskId, runStore);
 }
 
 export function createHttpHandler(scheduler: SchedulerService, runStore: RunStore): http.RequestListener {
@@ -197,7 +198,7 @@ export function createHttpHandler(scheduler: SchedulerService, runStore: RunStor
         switch (segments[5]) {
           case "run-now": {
             const run = await scheduler.createManualRun(taskId, target.workspacePath);
-            const task = await loadTaskAfterAction(workspaceKey, taskId);
+            const task = await loadTaskAfterAction(workspaceKey, taskId, runStore);
             json(response, 202, { task, run } satisfies GlobalDashboardActionResponse);
             return;
           }
@@ -217,7 +218,7 @@ export function createHttpHandler(scheduler: SchedulerService, runStore: RunStor
               throw new Error("runId must match the latest actionable run for this task");
             }
             const run = await scheduler.retryRun(retryRequest.runId, target.workspacePath);
-            const task = await loadTaskAfterAction(workspaceKey, taskId);
+            const task = await loadTaskAfterAction(workspaceKey, taskId, runStore);
             json(response, 202, { task, run } satisfies GlobalDashboardActionResponse);
             return;
           }

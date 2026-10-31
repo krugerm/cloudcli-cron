@@ -2,6 +2,7 @@ import { constants } from "node:fs";
 import { access, mkdir, readdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { RUN_STATUSES } from "../shared/model.js";
 import type {
   RecurrenceDefinition,
   WorkspaceAvailabilityState,
@@ -86,7 +87,8 @@ function isTaskEntry(value: unknown): value is WorkspaceTask {
     typeof value.recurrenceSummary === "string" &&
     typeof value.enabled === "boolean" &&
     (typeof value.nextRunAt === "string" || value.nextRunAt === null) &&
-    (typeof value.lastRunStatus === "string" || value.lastRunStatus === null) &&
+    (value.lastRunStatus === undefined || typeof value.lastRunStatus === "string" || value.lastRunStatus === null) &&
+    (value.legacyLastRunStatus === undefined || typeof value.legacyLastRunStatus === "string" || value.legacyLastRunStatus === null) &&
     typeof value.createdAt === "string" &&
     typeof value.updatedAt === "string"
   );
@@ -140,11 +142,20 @@ function coerceLedgerShape(raw: unknown, fallbackWorkspaceKey: string): { ledger
       version: typeof record.version === "number" ? record.version : STORAGE_VERSION,
       workspaceKey,
       workspacePath,
-      tasks: tasks.map((task) => ({
-        ...task,
-        workspaceKey,
-        workspacePath
-      })),
+      tasks: tasks.map((task) => {
+        const coerced: WorkspaceTask = {
+          ...task,
+          lastRunStatus: task.lastRunStatus ?? null,
+          workspaceKey,
+          workspacePath
+        };
+        if (typeof task.legacyLastRunStatus === "string" && (RUN_STATUSES as readonly string[]).includes(task.legacyLastRunStatus)) {
+          coerced.legacyLastRunStatus = task.legacyLastRunStatus;
+        } else {
+          delete coerced.legacyLastRunStatus;
+        }
+        return coerced;
+      }),
       executionProfile,
       updatedAt:
         typeof record.updatedAt === "string" && record.updatedAt.trim()
@@ -212,8 +223,9 @@ export async function saveWorkspaceLedger(ledger: WorkspaceLedger): Promise<void
   ledger.updatedAt = new Date().toISOString();
   ledger.version = STORAGE_VERSION;
 
-  const { runs: _legacyRuns, ...persisted } = ledger as WorkspaceLedger & { runs?: unknown };
+  const { runs: _legacyRuns, ...rest } = ledger as WorkspaceLedger & { runs?: unknown };
   void _legacyRuns;
+  const persisted = { ...rest, tasks: rest.tasks.map((task) => ({ ...task, lastRunStatus: null })) };
   const filePath = workspaceLedgerPath(ledger.workspacePath);
   const tempPath = `${filePath}.tmp`;
   await writeFile(tempPath, `${JSON.stringify(persisted, null, 2)}\n`, "utf8");
