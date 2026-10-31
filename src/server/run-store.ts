@@ -1,6 +1,7 @@
 import { DatabaseSync, type StatementSync } from "node:sqlite";
+import { RUN_PAGE_MAX, RUN_PAGE_SIZE } from "../shared/model.js";
 import type { NewRunEvent, RunEvent, RunEventSource, RunEventType, ScheduledRun } from "../shared/model.js";
-import { foldRun } from "./run-fold.js";
+import { RECOVERY_SUMMARY, foldRun } from "./run-fold.js";
 
 export const RUN_STORE_SCHEMA_VERSION = 1;
 
@@ -69,6 +70,36 @@ function toEvent(row: EventRow): RunEvent {
   };
 }
 
+export interface ListRunsOptions {
+  limit?: number;
+  before?: string | null;
+  taskId?: string | null;
+}
+
+export interface RunPage {
+  runs: ScheduledRun[];
+  nextCursor: string | null;
+}
+
+export interface TaskRunSummary {
+  latest: ScheduledRun | null;
+  latestFinished: ScheduledRun | null;
+}
+
+function clampLimit(limit: number | undefined): number {
+  if (limit === undefined || Number.isNaN(limit)) {
+    return RUN_PAGE_SIZE;
+  }
+  return Math.min(RUN_PAGE_MAX, Math.max(1, Math.trunc(limit)));
+}
+
+function parseCursor(cursor: string): number {
+  if (!/^[1-9]\d*$/u.test(cursor)) {
+    throw new Error("invalid cursor");
+  }
+  return Number(cursor);
+}
+
 export class RunStore {
   protected readonly db: DatabaseSync;
   private closed = false;
@@ -76,6 +107,7 @@ export class RunStore {
   private readonly runEventsStatement: StatementSync;
   private readonly hasRunStatement: StatementSync;
   private readonly hasOccurrenceStatement: StatementSync;
+  private readonly pageStatements = new Map<string, StatementSync>();
 
   constructor(dbPath: string) {
     this.db = new DatabaseSync(dbPath);
@@ -165,6 +197,100 @@ export class RunStore {
 
   hasOccurrence(workspaceKey: string, occurrenceKey: string): boolean {
     return this.hasOccurrenceStatement.get(workspaceKey, occurrenceKey) !== undefined;
+  }
+
+  private pageStatement(withTask: boolean, withCursor: boolean): StatementSync {
+    const key = `${withTask}:${withCursor}`;
+    let statement = this.pageStatements.get(key);
+    if (!statement) {
+      statement = this.db.prepare(
+        "SELECT run_id, seq FROM run_events f WHERE workspace_key = ?" +
+          (withTask ? " AND task_id = ?" : "") +
+          " AND seq = (SELECT MIN(seq) FROM run_events WHERE run_id = f.run_id)" +
+          (withCursor ? " AND seq < ?" : "") +
+          " ORDER BY seq DESC LIMIT ?"
+      );
+      this.pageStatements.set(key, statement);
+    }
+    return statement;
+  }
+
+  listRuns(workspaceKey: string, options: ListRunsOptions = {}): RunPage {
+    const limit = clampLimit(options.limit);
+    const before = options.before === undefined || options.before === null ? null : parseCursor(options.before);
+    const params: Array<string | number> = [workspaceKey];
+    if (options.taskId) {
+      params.push(options.taskId);
+    }
+    if (before !== null) {
+      params.push(before);
+    }
+    params.push(limit + 1);
+    const heads = this.pageStatement(Boolean(options.taskId), before !== null).all(...params) as unknown as Array<{
+      run_id: string;
+      seq: number;
+    }>;
+    const hasMore = heads.length > limit;
+    const kept = hasMore ? heads.slice(0, limit) : heads;
+    if (!kept.length) {
+      return { runs: [], nextCursor: null };
+    }
+
+    const placeholders = kept.map(() => "?").join(", ");
+    const rows = this.db
+      .prepare(`SELECT * FROM run_events WHERE run_id IN (${placeholders}) ORDER BY run_id, seq`)
+      .all(...kept.map((head) => head.run_id)) as unknown as EventRow[];
+    const grouped = new Map<string, RunEvent[]>();
+    for (const row of rows) {
+      const list = grouped.get(row.run_id) ?? [];
+      list.push(toEvent(row));
+      grouped.set(row.run_id, list);
+    }
+    const runs = kept.map((head) => foldRun(grouped.get(head.run_id)!));
+    return { runs, nextCursor: hasMore ? String(runs[runs.length - 1]!.sequence) : null };
+  }
+
+  taskRunSummaries(workspaceKey: string, taskIds: string[]): Map<string, TaskRunSummary> {
+    const summaries = new Map<string, TaskRunSummary>();
+    for (const taskId of taskIds) {
+      let latest: ScheduledRun | null = null;
+      let latestFinished: ScheduledRun | null = null;
+      let before: string | null = null;
+      do {
+        const page = this.listRuns(workspaceKey, { taskId, limit: 5, before });
+        latest ??= page.runs[0] ?? null;
+        latestFinished = page.runs.find((run) => run.finishedAt !== null) ?? null;
+        before = page.nextCursor;
+      } while (!latestFinished && before);
+      summaries.set(taskId, { latest, latestFinished });
+    }
+    return summaries;
+  }
+
+  recoverInterruptedRuns(now: string): number {
+    const rows = this.db.prepare(RECOVER_INTERRUPTED_SQL).all() as unknown as Array<{ run_id: string }>;
+    const events: NewRunEvent[] = [];
+    for (const { run_id: runId } of rows) {
+      const run = this.getRun(runId);
+      if (!run) {
+        continue;
+      }
+      events.push({
+        runId: run.id,
+        workspaceKey: run.workspaceKey,
+        taskId: run.taskId,
+        occurrenceKey: run.occurrenceKey,
+        scheduledFor: run.scheduledFor,
+        retryOfRunId: run.retryOfRunId,
+        type: "failed",
+        at: now,
+        source: "recovery",
+        summary: RECOVERY_SUMMARY,
+        failureReason: RECOVERY_SUMMARY
+      });
+    }
+    this.appendEvents(events);
+    return events.length;
   }
 
   close(): void {

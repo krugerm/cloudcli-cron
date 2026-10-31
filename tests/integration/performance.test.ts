@@ -5,6 +5,7 @@ import { performance } from "node:perf_hooks";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { ScheduledRun, WorkspaceTask } from "../../src/shared/model.js";
 import { buildGlobalDashboardSnapshot } from "../../src/server/dashboard.js";
+import { RunStore } from "../../src/server/run-store.js";
 import { SchedulerService } from "../../src/server/scheduler.js";
 import { saveWorkspaceLedger } from "../../src/server/storage.js";
 import { workspaceKeyFromPath } from "../../src/shared/workspace.js";
@@ -131,4 +132,69 @@ describe("performance fixtures", () => {
     expect(snapshot.summary.totalJobs).toBe(100);
     expect(durationMs).toBeLessThan(2_000);
   });
+});
+
+describe("run store at 500k events", () => {
+  it("meets the paging, summary and append budgets", () => {
+    const store = new RunStore(":memory:");
+    const workspaces = Array.from({ length: 5 }, (_, index) => `ws-${index}`);
+    const tasks = workspaces.flatMap((workspaceKey) =>
+      Array.from({ length: 4 }, (_, index) => ({ workspaceKey, taskId: `${workspaceKey}-task-${index}` }))
+    );
+    const summary = "x".repeat(1_000);
+    const events = [];
+    for (let index = 0; index < 250_000; index += 1) {
+      const { workspaceKey, taskId } = tasks[index % tasks.length]!;
+      const base = {
+        runId: `run-${index}`,
+        workspaceKey,
+        taskId,
+        occurrenceKey: `${taskId}:${index}`,
+        scheduledFor: "2026-04-27T07:00:00.000Z",
+        source: "scheduler" as const,
+        summary
+      };
+      events.push({ ...base, type: "started" as const, at: "2026-04-27T07:00:01.000Z" });
+      events.push({ ...base, type: "succeeded" as const, at: "2026-04-27T07:00:02.000Z" });
+    }
+    store.appendEvents(events);
+
+    const time = (fn: () => unknown): number => {
+      fn();
+      const startedAt = performance.now();
+      for (let index = 0; index < 20; index += 1) {
+        fn();
+      }
+      return (performance.now() - startedAt) / 20;
+    };
+
+    expect(time(() => store.listRuns("ws-0"))).toBeLessThan(50);
+    expect(time(() => store.listRuns("ws-0", { taskId: "ws-0-task-1" }))).toBeLessThan(50);
+    expect(
+      time(() => {
+        for (const workspaceKey of workspaces) {
+          store.taskRunSummaries(
+            workspaceKey,
+            tasks.filter((task) => task.workspaceKey === workspaceKey).map((task) => task.taskId)
+          );
+        }
+      })
+    ).toBeLessThan(50);
+    expect(
+      time(() =>
+        store.appendEvent({
+          runId: `extra-${Math.random()}`,
+          workspaceKey: "ws-0",
+          taskId: "ws-0-task-0",
+          occurrenceKey: `k-${Math.random()}`,
+          scheduledFor: "2026-04-27T07:00:00.000Z",
+          type: "missed",
+          at: "2026-04-27T07:00:00.000Z",
+          source: "scheduler",
+          summary: "late"
+        })
+      )
+    ).toBeLessThan(5);
+    store.close();
+  }, 120_000);
 });
