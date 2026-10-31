@@ -1,12 +1,13 @@
 import * as os from "node:os";
 import path from "node:path";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { DateTime } from "luxon";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { SchedulerService } from "../../src/server/scheduler.js";
 import { LocalExecutionAdapter } from "../../src/server/execution-adapter.js";
 import { RunStore } from "../../src/server/run-store.js";
 import { workspaceKeyFromPath } from "../../src/shared/workspace.js";
+import { seedRuns } from "../helpers/seed.js";
 import { nextOccurrenceForRecurrence } from "../../src/server/recurrence.js";
 import { loadWorkspaceLedger, saveWorkspaceLedger } from "../../src/server/storage.js";
 
@@ -124,7 +125,6 @@ describe("scheduler service integration", () => {
     expect(updated.tasks[0]?.lastRunStatus).toBe("succeeded");
 
     await scheduler.tickWithoutDispatcher();
-    const replayCheck = await loadWorkspaceLedger(workspacePath);
     expect(runsOf()).toHaveLength(1);
   });
 
@@ -230,7 +230,6 @@ describe("scheduler service integration", () => {
 
     await scheduler.tickWithoutDispatcher();
 
-    const afterResume = await loadWorkspaceLedger(workspacePath);
     expect(runsOf()[0]?.status).toBe("missed");
   });
 
@@ -310,5 +309,42 @@ describe("scheduler service integration", () => {
     expect(runsOf()).toHaveLength(2);
     expect(runsOf()[0]?.id).toBe(retriedRun.id);
     expect(runsOf()[1]?.id).toBe(failedRun.id);
+  });
+
+  it("lists runs by the ledger's workspacePath for a misnamed ledger file without rewriting it", async () => {
+    const otherPath = path.join(tempHome, "other-project");
+    const dataDir = path.join(tempHome, ".cloudcli-workspace-scheduled-prompts");
+    await mkdir(dataDir, { recursive: true });
+    const ledgerFile = path.join(dataDir, `${workspaceKeyFromPath(workspacePath)}.json`);
+    const contents = `${JSON.stringify({
+      version: 2,
+      workspaceKey: workspaceKeyFromPath(otherPath),
+      workspacePath: otherPath,
+      tasks: [],
+      executionProfile: null,
+      updatedAt: "2026-04-26T08:00:00.000Z"
+    })}\n`;
+    await writeFile(ledgerFile, contents, "utf8");
+    seedRuns(store, otherPath, [
+      {
+        id: "run-b",
+        occurrenceKey: "task-b:2026-04-27T07:00:00.000Z",
+        taskId: "task-b",
+        workspaceKey: workspaceKeyFromPath(otherPath),
+        scheduledFor: "2026-04-27T07:00:00.000Z",
+        startedAt: "2026-04-27T07:00:01.000Z",
+        finishedAt: "2026-04-27T07:00:09.000Z",
+        status: "succeeded",
+        outcomeSummary: "ok",
+        failureReason: null,
+        retryOfRunId: null,
+        executionRequest: null
+      }
+    ]);
+
+    const page = await createScheduler().listRuns(workspacePath);
+
+    expect(page.runs.map((run) => run.id)).toEqual(["run-b"]);
+    expect(await readFile(ledgerFile, "utf8")).toBe(contents);
   });
 });

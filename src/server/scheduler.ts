@@ -71,7 +71,8 @@ export class SchedulerService {
   }
 
   async listRuns(workspacePath: string, options: ListRunsOptions = {}): Promise<RunPage> {
-    return this.runStore.listRuns(workspaceKeyFromPath(workspacePath), options);
+    const ledger = await loadWorkspaceLedger(workspacePath);
+    return this.runStore.listRuns(workspaceKeyFromPath(ledger.workspacePath), options);
   }
 
   private requireRun(runId: string): ScheduledRun {
