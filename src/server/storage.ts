@@ -4,7 +4,6 @@ import os from "node:os";
 import path from "node:path";
 import type {
   RecurrenceDefinition,
-  ScheduledRun,
   WorkspaceAvailabilityState,
   WorkspaceLedger,
   WorkspaceTask
@@ -12,19 +11,19 @@ import type {
 import { normalizeWorkspacePath, projectNameFromWorkspacePath, workspaceKeyFromPath } from "../shared/workspace.js";
 import { validateRecurrenceDefinition } from "./recurrence.js";
 
-const STORAGE_VERSION = 1;
+export const STORAGE_VERSION = 2;
 const DATA_DIR_NAME = ".cloudcli-workspace-scheduled-prompts";
 
 export interface WorkspaceLedgerRecord extends WorkspaceAvailabilityState {
   ledger: WorkspaceLedger | null;
 }
 
-function dataRoot(): string {
+export function ledgerDataRoot(): string {
   return path.join(os.homedir(), DATA_DIR_NAME);
 }
 
 function workspaceLedgerPath(workspacePath: string): string {
-  return path.join(dataRoot(), `${workspaceKeyFromPath(workspacePath)}.json`);
+  return path.join(ledgerDataRoot(), `${workspaceKeyFromPath(workspacePath)}.json`);
 }
 
 function createEmptyLedger(workspacePath: string): WorkspaceLedger {
@@ -34,14 +33,13 @@ function createEmptyLedger(workspacePath: string): WorkspaceLedger {
     workspaceKey: workspaceKeyFromPath(normalized),
     workspacePath: normalized,
     tasks: [],
-    runs: [],
     executionProfile: null,
     updatedAt: new Date().toISOString()
   };
 }
 
-async function ensureDataDir(): Promise<void> {
-  await mkdir(dataRoot(), { recursive: true });
+export async function ensureLedgerDataDir(): Promise<void> {
+  await mkdir(ledgerDataRoot(), { recursive: true });
 }
 
 async function readLedgerFile(filePath: string): Promise<WorkspaceLedger | null> {
@@ -56,7 +54,7 @@ async function readLedgerFile(filePath: string): Promise<WorkspaceLedger | null>
   }
 }
 
-function isObject(value: unknown): value is Record<string, unknown> {
+export function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
@@ -94,27 +92,6 @@ function isTaskEntry(value: unknown): value is WorkspaceTask {
   );
 }
 
-function isRunEntry(value: unknown): value is ScheduledRun {
-  if (!isObject(value)) {
-    return false;
-  }
-
-  return (
-    typeof value.id === "string" &&
-    typeof value.occurrenceKey === "string" &&
-    typeof value.taskId === "string" &&
-    typeof value.workspaceKey === "string" &&
-    typeof value.scheduledFor === "string" &&
-    (typeof value.startedAt === "string" || value.startedAt === null) &&
-    (typeof value.finishedAt === "string" || value.finishedAt === null) &&
-    typeof value.status === "string" &&
-    typeof value.outcomeSummary === "string" &&
-    (typeof value.failureReason === "string" || value.failureReason === null) &&
-    (typeof value.retryOfRunId === "string" || value.retryOfRunId === null) &&
-    (isObject(value.executionRequest) || value.executionRequest === null)
-  );
-}
-
 function filterLedgerEntries<T>(
   values: unknown,
   guard: (value: unknown) => value is T
@@ -142,21 +119,17 @@ function coerceLedgerShape(raw: unknown, fallbackWorkspaceKey: string): { ledger
   const workspacePath = normalizeWorkspacePath(record.workspacePath);
   const workspaceKey = fallbackWorkspaceKey;
   const { entries: tasks, repaired: repairedTasks } = filterLedgerEntries(record.tasks, isTaskEntry);
-  const { entries: runs, repaired: repairedRuns } = filterLedgerEntries(record.runs, isRunEntry);
   const executionProfile =
     record.executionProfile && typeof record.executionProfile === "object"
       ? (record.executionProfile as WorkspaceLedger["executionProfile"])
       : null;
 
   const repairNotes: string[] = [];
-  if (!Array.isArray(record.tasks) || !Array.isArray(record.runs)) {
+  if (!Array.isArray(record.tasks)) {
     repairNotes.push("Ledger metadata was partially repaired while loading.");
   }
   if (repairedTasks) {
     repairNotes.push("Invalid task entries were ignored.");
-  }
-  if (repairedRuns) {
-    repairNotes.push("Invalid run entries were ignored.");
   }
   if (typeof record.workspaceKey === "string" && record.workspaceKey.trim() && record.workspaceKey.trim() !== workspaceKey) {
     repairNotes.push("Ledger workspace key was repaired from the filename.");
@@ -171,11 +144,6 @@ function coerceLedgerShape(raw: unknown, fallbackWorkspaceKey: string): { ledger
         ...task,
         workspaceKey,
         workspacePath
-      })),
-      runs: runs.map((run) => ({
-        ...run,
-        sequence: 0,
-        workspaceKey
       })),
       executionProfile,
       updatedAt:
@@ -233,24 +201,27 @@ async function inspectLedgerFile(filePath: string, fileName: string): Promise<Wo
 }
 
 export async function loadWorkspaceLedger(workspacePath: string): Promise<WorkspaceLedger> {
-  await ensureDataDir();
+  await ensureLedgerDataDir();
   const normalized = normalizeWorkspacePath(workspacePath);
   const ledger = await readLedgerFile(workspaceLedgerPath(normalized));
   return ledger ?? createEmptyLedger(normalized);
 }
 
 export async function saveWorkspaceLedger(ledger: WorkspaceLedger): Promise<void> {
-  await ensureDataDir();
+  await ensureLedgerDataDir();
   ledger.updatedAt = new Date().toISOString();
+  ledger.version = STORAGE_VERSION;
 
+  const { runs: _legacyRuns, ...persisted } = ledger as WorkspaceLedger & { runs?: unknown };
+  void _legacyRuns;
   const filePath = workspaceLedgerPath(ledger.workspacePath);
   const tempPath = `${filePath}.tmp`;
-  await writeFile(tempPath, `${JSON.stringify(ledger, null, 2)}\n`, "utf8");
+  await writeFile(tempPath, `${JSON.stringify(persisted, null, 2)}\n`, "utf8");
   await rename(tempPath, filePath);
 }
 
 export async function deleteWorkspaceLedger(workspacePath: string): Promise<void> {
-  await ensureDataDir();
+  await ensureLedgerDataDir();
   try {
     await unlink(workspaceLedgerPath(workspacePath));
   } catch (error) {
@@ -268,12 +239,12 @@ export async function listWorkspaceLedgers(): Promise<WorkspaceLedger[]> {
 }
 
 export async function listWorkspaceLedgerRecords(): Promise<WorkspaceLedgerRecord[]> {
-  await ensureDataDir();
-  const entries = await readdir(dataRoot(), { withFileTypes: true });
+  await ensureLedgerDataDir();
+  const entries = await readdir(ledgerDataRoot(), { withFileTypes: true });
   const records = await Promise.all(
     entries
       .filter((entry) => entry.isFile() && entry.name.endsWith(".json"))
-      .map((entry) => inspectLedgerFile(path.join(dataRoot(), entry.name), entry.name))
+      .map((entry) => inspectLedgerFile(path.join(ledgerDataRoot(), entry.name), entry.name))
   );
 
   return records.sort((left, right) => left.workspaceLabel.localeCompare(right.workspaceLabel));

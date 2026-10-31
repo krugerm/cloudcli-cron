@@ -1,6 +1,6 @@
 import * as os from "node:os";
 import path from "node:path";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { listWorkspaceLedgerRecords, loadWorkspaceLedger, saveWorkspaceLedger } from "../../src/server/storage.js";
 
@@ -124,9 +124,8 @@ describe("storage", () => {
 
     expect(partial?.status).toBe("partial");
     expect(partial?.ledger?.tasks).toHaveLength(1);
-    expect(partial?.ledger?.runs).toHaveLength(1);
     expect(partial?.warning).toContain("Invalid task entries were ignored.");
-    expect(partial?.warning).toContain("Invalid run entries were ignored.");
+    expect(partial?.warning).not.toContain("Invalid run entries");
   });
 
   it("rejects malformed recurrence payloads during ledger repair", async () => {
@@ -266,5 +265,22 @@ describe("storage", () => {
     expect(beta?.ledger?.workspaceKey).toBe("beta");
     expect(alpha?.ledger?.tasks[0]?.workspaceKey).toBe("alpha");
     expect(beta?.ledger?.tasks[0]?.workspaceKey).toBe("beta");
+  });
+
+  it("treats a ledger without runs as available and never writes runs", async () => {
+    await mkdir("/tmp/project-v2", { recursive: true });
+    const ledger = await loadWorkspaceLedger("/tmp/project-v2");
+    (ledger as typeof ledger & { runs?: unknown[] }).runs = [{ stale: true }];
+    await saveWorkspaceLedger(ledger);
+
+    const dataDir = path.join(tempHome, ".cloudcli-workspace-scheduled-prompts");
+    const file = JSON.parse(await readFile(path.join(dataDir, `${ledger.workspaceKey}.json`), "utf8"));
+    expect(file.version).toBe(2);
+    expect("runs" in file).toBe(false);
+
+    const records = await listWorkspaceLedgerRecords();
+    const record = records.find((entry) => entry.workspacePath === "/tmp/project-v2");
+    expect(record?.status).toBe("available");
+    expect(record?.warning).toBeNull();
   });
 });

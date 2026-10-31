@@ -7,7 +7,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { buildGlobalDashboardSnapshot } from "../../src/server/dashboard.js";
 import { startHttpServer } from "../../src/server/http.js";
 import { SchedulerService } from "../../src/server/scheduler.js";
-import { loadWorkspaceLedger, saveWorkspaceLedger } from "../../src/server/storage.js";
+import { loadWorkspaceLedger } from "../../src/server/storage.js";
+import { LocalExecutionAdapter } from "../../src/server/execution-adapter.js";
+import { createTestRunStore, seedLedger } from "../helpers/seed.js";
 import { WorkspaceScheduledPromptsApp } from "../../src/client/app.js";
 import { renderGlobalDashboard } from "../../src/client/views/global-dashboard.js";
 import type { GlobalDashboardSnapshot } from "../../src/shared/model.js";
@@ -78,6 +80,7 @@ describe("global dashboard view", () => {
     const tempHome = await mkdtemp(path.join(os.tmpdir(), "scheduled-prompts-global-"));
     const previousHome = process.env.HOME;
     process.env.HOME = tempHome;
+    const store = createTestRunStore();
 
     try {
       const workspaceA = path.join(tempHome, "alpha");
@@ -88,7 +91,7 @@ describe("global dashboard view", () => {
       const workspaceAKey = workspaceKeyFromPath(workspaceA);
       const workspaceBKey = workspaceKeyFromPath(workspaceB);
 
-      await saveWorkspaceLedger({
+      await seedLedger(store, {
         version: 1,
         workspaceKey: workspaceAKey,
         workspacePath: workspaceA,
@@ -113,7 +116,7 @@ describe("global dashboard view", () => {
         updatedAt: "2026-04-27T08:00:00.000Z"
       });
 
-      await saveWorkspaceLedger({
+      await seedLedger(store, {
         version: 1,
         workspaceKey: workspaceBKey,
         workspacePath: workspaceB,
@@ -138,10 +141,11 @@ describe("global dashboard view", () => {
         updatedAt: "2026-04-27T08:00:00.000Z"
       });
 
-      const aggregated = await buildGlobalDashboardSnapshot({ sortBy: "workspace" });
+      const aggregated = await buildGlobalDashboardSnapshot({ sortBy: "workspace" }, store);
       expect(aggregated.jobs).toHaveLength(2);
       expect(aggregated.jobs.map((job) => job.workspaceLabel)).toEqual(["alpha", "beta"]);
     } finally {
+      store.close();
       process.env.HOME = previousHome;
       await rm(tempHome, { recursive: true, force: true });
     }
@@ -151,6 +155,7 @@ describe("global dashboard view", () => {
     const tempHome = await mkdtemp(path.join(os.tmpdir(), "scheduled-prompts-global-"));
     const previousHome = process.env.HOME;
     process.env.HOME = tempHome;
+    const store = createTestRunStore();
 
     try {
       const workspaceA = path.join(tempHome, "alpha");
@@ -161,7 +166,7 @@ describe("global dashboard view", () => {
       const workspaceAKey = workspaceKeyFromPath(workspaceA);
       const workspaceBKey = workspaceKeyFromPath(workspaceB);
 
-      await saveWorkspaceLedger({
+      await seedLedger(store, {
         version: 1,
         workspaceKey: workspaceAKey,
         workspacePath: workspaceA,
@@ -201,7 +206,7 @@ describe("global dashboard view", () => {
         updatedAt: "2026-04-27T08:00:00.000Z"
       });
 
-      await saveWorkspaceLedger({
+      await seedLedger(store, {
         version: 1,
         workspaceKey: workspaceBKey,
         workspacePath: workspaceB,
@@ -241,13 +246,14 @@ describe("global dashboard view", () => {
         updatedAt: "2026-04-27T08:00:00.000Z"
       });
 
-      const filtered = await buildGlobalDashboardSnapshot({ sortBy: "urgency", status: "problem" });
+      const filtered = await buildGlobalDashboardSnapshot({ sortBy: "urgency", status: "problem" }, store);
       expect(filtered.jobs).toHaveLength(1);
       expect(filtered.jobs[0]?.taskId).toBe("task-failed");
       expect(filtered.summary.totalJobs).toBe(2);
       expect(filtered.summary.problemJobs).toBe(1);
       expect(filtered.summary.workspacesTotal).toBe(2);
     } finally {
+      store.close();
       process.env.HOME = previousHome;
       await rm(tempHome, { recursive: true, force: true });
     }
@@ -323,12 +329,13 @@ describe("global dashboard view", () => {
     const tempHome = await mkdtemp(path.join(os.tmpdir(), "scheduled-prompts-global-unreadable-"));
     const previousHome = process.env.HOME;
     process.env.HOME = tempHome;
+    const store = createTestRunStore();
 
     try {
       const dataDir = path.join(tempHome, ".cloudcli-workspace-scheduled-prompts");
       await mkdir(dataDir, { recursive: true });
       await rm(path.join(tempHome, "missing-workspace"), { recursive: true, force: true });
-      await saveWorkspaceLedger({
+      await seedLedger(store, {
         version: 1,
         workspaceKey: "workspace-keep",
         workspacePath: path.join(tempHome, "workspace-keep"),
@@ -355,7 +362,7 @@ describe("global dashboard view", () => {
       await rm(path.join(tempHome, "workspace-keep"), { recursive: true, force: true });
       await writeFile(path.join(dataDir, "broken.json"), "{invalid", "utf8");
 
-      const generated = await buildGlobalDashboardSnapshot({ sortBy: "urgency" });
+      const generated = await buildGlobalDashboardSnapshot({ sortBy: "urgency" }, store);
       const section = renderGlobalDashboard(generated, false, null, { sortBy: "urgency" }, {
         onRefresh: vi.fn(),
         onSetStatusFilter: vi.fn(),
@@ -372,6 +379,7 @@ describe("global dashboard view", () => {
       expect(section.textContent).toContain("Ledger could not be read");
       expect(section.textContent).toContain("Partial data");
     } finally {
+      store.close();
       process.env.HOME = previousHome;
       await rm(tempHome, { recursive: true, force: true });
     }
@@ -807,6 +815,7 @@ describe("global dashboard view", () => {
     const tempHome = await mkdtemp(path.join(os.tmpdir(), "scheduled-prompts-global-http-"));
     const previousHome = process.env.HOME;
     process.env.HOME = tempHome;
+    const store = createTestRunStore();
 
     let server: Awaited<ReturnType<typeof startHttpServer>> | null = null;
 
@@ -819,7 +828,7 @@ describe("global dashboard view", () => {
       const workspaceAKey = workspaceKeyFromPath(workspaceA);
       const workspaceBKey = workspaceKeyFromPath(workspaceB);
 
-      await saveWorkspaceLedger({
+      await seedLedger(store, {
         version: 1,
         workspaceKey: workspaceAKey,
         workspacePath: workspaceA,
@@ -859,7 +868,7 @@ describe("global dashboard view", () => {
         updatedAt: "2026-04-27T08:00:00.000Z"
       });
 
-      await saveWorkspaceLedger({
+      await seedLedger(store, {
         version: 1,
         workspaceKey: workspaceBKey,
         workspacePath: workspaceB,
@@ -884,7 +893,7 @@ describe("global dashboard view", () => {
         updatedAt: "2026-04-27T08:00:00.000Z"
       });
 
-      server = await startHttpServer(new SchedulerService());
+      server = await startHttpServer(new SchedulerService(new LocalExecutionAdapter(), store), store);
       const address = server.address();
       if (!address || typeof address === "string") {
         throw new Error("Expected an ephemeral HTTP port.");
@@ -937,6 +946,7 @@ describe("global dashboard view", () => {
       expect(refreshedA.tasks[0]?.enabled).toBe(false);
       expect(refreshedB.tasks[0]?.enabled).toBe(true);
     } finally {
+      store.close();
       process.env.HOME = previousHome;
       await new Promise<void>((resolve, reject) => {
         if (!server) {
@@ -953,6 +963,7 @@ describe("global dashboard view", () => {
     const tempHome = await mkdtemp(path.join(os.tmpdir(), "scheduled-prompts-global-http-repaired-"));
     const previousHome = process.env.HOME;
     process.env.HOME = tempHome;
+    const store = createTestRunStore();
 
     let server: Awaited<ReturnType<typeof startHttpServer>> | null = null;
 
@@ -996,7 +1007,7 @@ describe("global dashboard view", () => {
         "utf8"
       );
 
-      server = await startHttpServer(new SchedulerService());
+      server = await startHttpServer(new SchedulerService(new LocalExecutionAdapter(), store), store);
       const address = server.address();
       if (!address || typeof address === "string") {
         throw new Error("Expected an ephemeral HTTP port.");
@@ -1014,6 +1025,7 @@ describe("global dashboard view", () => {
       expect(payload.run.taskId).toBe("task-repaired");
       expect(payload.run.status).toBe("failed");
     } finally {
+      store.close();
       process.env.HOME = previousHome;
       await new Promise<void>((resolve, reject) => {
         if (!server) {

@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import type http from "node:http";
 import { startHttpServer } from "../../src/server/http.js";
 import { HttpError } from "../../src/server/http-error.js";
+import type { RunStore } from "../../src/server/run-store.js";
 import type { SchedulerService } from "../../src/server/scheduler.js";
 
 describe("http error mapping", () => {
@@ -13,7 +14,7 @@ describe("http error mapping", () => {
   });
 
   async function post(scheduler: Partial<SchedulerService>, url: string): Promise<Response> {
-    server = await startHttpServer(scheduler as SchedulerService);
+    server = await startHttpServer(scheduler as SchedulerService, {} as RunStore);
     const address = server.address();
     if (!address || typeof address === "string") {
       throw new Error("Expected an ephemeral port");

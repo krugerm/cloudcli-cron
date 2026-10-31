@@ -7,7 +7,8 @@ import type { ScheduledRun, WorkspaceTask } from "../../src/shared/model.js";
 import { buildGlobalDashboardSnapshot } from "../../src/server/dashboard.js";
 import { RunStore } from "../../src/server/run-store.js";
 import { SchedulerService } from "../../src/server/scheduler.js";
-import { saveWorkspaceLedger } from "../../src/server/storage.js";
+import { LocalExecutionAdapter } from "../../src/server/execution-adapter.js";
+import { createTestRunStore, seedLedger } from "../helpers/seed.js";
 import { workspaceKeyFromPath } from "../../src/shared/workspace.js";
 
 describe("performance fixtures", () => {
@@ -28,7 +29,8 @@ describe("performance fixtures", () => {
     await rm(tempHome, { recursive: true, force: true });
   });
 
-  it("loads 100 tasks and 500 runs within the documented budget", async () => {
+  it("loads 100 tasks and the first page of 500 runs within the documented budget", async () => {
+    const store = createTestRunStore();
     const workspaceKey = workspaceKeyFromPath(workspacePath);
     const createdAt = "2026-04-26T08:00:00.000Z";
     const tasks: WorkspaceTask[] = Array.from({ length: 100 }, (_, index) => ({
@@ -65,7 +67,7 @@ describe("performance fixtures", () => {
       executionRequest: null
     }));
 
-    await saveWorkspaceLedger({
+    await seedLedger(store, {
       version: 1,
       workspaceKey,
       workspacePath,
@@ -75,7 +77,7 @@ describe("performance fixtures", () => {
       updatedAt: createdAt
     });
 
-    const scheduler = new SchedulerService();
+    const scheduler = new SchedulerService(new LocalExecutionAdapter(), store);
     const startedAt = performance.now();
     const state = await scheduler.loadWorkspaceState(workspacePath, {
       status: "needs_config",
@@ -84,11 +86,14 @@ describe("performance fixtures", () => {
     const durationMs = performance.now() - startedAt;
 
     expect(state.tasks).toHaveLength(100);
-    expect(state.runs).toHaveLength(500);
+    expect(state.runs).toHaveLength(100);
+    expect(state.runsNextCursor).not.toBeNull();
     expect(durationMs).toBeLessThan(2_000);
+    store.close();
   });
 
   it("builds a 100-job global dashboard snapshot within the documented budget", async () => {
+    const store = createTestRunStore();
     const workspacePaths = Array.from({ length: 4 }, (_, index) => path.join(tempHome, `project-${index}`));
     const startedAt = performance.now();
 
@@ -114,7 +119,7 @@ describe("performance fixtures", () => {
         updatedAt: "2026-04-26T08:00:00.000Z"
       }));
 
-      await saveWorkspaceLedger({
+      await seedLedger(store, {
         version: 1,
         workspaceKey,
         workspacePath: currentPath,
@@ -125,12 +130,13 @@ describe("performance fixtures", () => {
       });
     }
 
-    const snapshot = await buildGlobalDashboardSnapshot({ sortBy: "urgency" });
+    const snapshot = await buildGlobalDashboardSnapshot({ sortBy: "urgency" }, store);
     const durationMs = performance.now() - startedAt;
 
     expect(snapshot.jobs).toHaveLength(100);
     expect(snapshot.summary.totalJobs).toBe(100);
     expect(durationMs).toBeLessThan(2_000);
+    store.close();
   });
 });
 

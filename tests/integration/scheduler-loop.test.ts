@@ -4,6 +4,9 @@ import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { DateTime } from "luxon";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { SchedulerService } from "../../src/server/scheduler.js";
+import { LocalExecutionAdapter } from "../../src/server/execution-adapter.js";
+import { RunStore } from "../../src/server/run-store.js";
+import { workspaceKeyFromPath } from "../../src/shared/workspace.js";
 import { nextOccurrenceForRecurrence } from "../../src/server/recurrence.js";
 import { loadWorkspaceLedger, saveWorkspaceLedger } from "../../src/server/storage.js";
 
@@ -11,6 +14,7 @@ describe("scheduler service integration", () => {
   let tempHome: string;
   let workspacePath: string;
   let previousHome: string | undefined;
+  let store: RunStore;
 
   beforeEach(async () => {
     tempHome = await mkdtemp(path.join(os.tmpdir(), "scheduled-prompts-int-"));
@@ -18,15 +22,20 @@ describe("scheduler service integration", () => {
     await mkdir(workspacePath, { recursive: true });
     previousHome = process.env.HOME;
     process.env.HOME = tempHome;
+    store = new RunStore(":memory:");
   });
 
   afterEach(async () => {
+    store.close();
     process.env.HOME = previousHome;
     await rm(tempHome, { recursive: true, force: true });
   });
 
+  const createScheduler = () => new SchedulerService(new LocalExecutionAdapter(), store);
+  const runsOf = () => store.listRuns(workspaceKeyFromPath(workspacePath)).runs;
+
   it("creates and reloads a persisted recurring task with computed summary and next run", async () => {
-    const scheduler = new SchedulerService();
+    const scheduler = createScheduler();
     const task = await scheduler.createTask({
       workspacePath,
       name: "Morning summary",
@@ -50,7 +59,7 @@ describe("scheduler service integration", () => {
   });
 
   it("updates a task and recalculates its recurrence summary", async () => {
-    const scheduler = new SchedulerService();
+    const scheduler = createScheduler();
     const task = await scheduler.createTask({
       workspacePath,
       name: "Weekly review",
@@ -79,7 +88,7 @@ describe("scheduler service integration", () => {
   });
 
   it("executes due runs through the local command profile and records the result", async () => {
-    const scheduler = new SchedulerService();
+    const scheduler = createScheduler();
     const task = await scheduler.createTask({
       workspacePath,
       name: "Morning summary",
@@ -109,18 +118,18 @@ describe("scheduler service integration", () => {
     await scheduler.tickWithoutDispatcher();
 
     const updated = await loadWorkspaceLedger(workspacePath);
-    expect(updated.runs).toHaveLength(1);
-    expect(updated.runs[0]?.status).toBe("succeeded");
-    expect(updated.runs[0]?.outcomeSummary).toContain("stdin:Summarize the workspace.");
+    expect(runsOf()).toHaveLength(1);
+    expect(runsOf()[0]?.status).toBe("succeeded");
+    expect(runsOf()[0]?.outcomeSummary).toContain("stdin:Summarize the workspace.");
     expect(updated.tasks[0]?.lastRunStatus).toBe("succeeded");
 
     await scheduler.tickWithoutDispatcher();
     const replayCheck = await loadWorkspaceLedger(workspacePath);
-    expect(replayCheck.runs).toHaveLength(1);
+    expect(runsOf()).toHaveLength(1);
   });
 
   it("marks due runs as missed when no execution profile is configured", async () => {
-    const scheduler = new SchedulerService();
+    const scheduler = createScheduler();
     await scheduler.createTask({
       workspacePath,
       name: "Morning summary",
@@ -139,12 +148,12 @@ describe("scheduler service integration", () => {
     await scheduler.tickWithoutDispatcher();
 
     const updated = await loadWorkspaceLedger(workspacePath);
-    expect(updated.runs[0]?.status).toBe("missed");
-    expect(updated.runs[0]?.outcomeSummary).toContain("Configure a local execution command");
+    expect(runsOf()[0]?.status).toBe("missed");
+    expect(runsOf()[0]?.outcomeSummary).toContain("Configure a local execution command");
   });
 
   it("records all missed recurring occurrences in one tick and resumes from the next future slot", async () => {
-    const scheduler = new SchedulerService();
+    const scheduler = createScheduler();
     const recurrence = {
       scheduleType: "daily" as const,
       timezone: "Europe/Paris",
@@ -178,17 +187,17 @@ describe("scheduler service integration", () => {
     await scheduler.tickWithoutDispatcher();
 
     const updated = await loadWorkspaceLedger(workspacePath);
-    expect(updated.runs).toHaveLength(expectedOccurrences.length);
-    expect(updated.runs.every((run) => run.status === "missed")).toBe(true);
-    expect(updated.runs.map((run) => run.scheduledFor).sort()).toEqual([...expectedOccurrences].sort());
-    expect(updated.runs.every((run) => run.outcomeSummary.includes("Configure a local execution command"))).toBe(true);
+    expect(runsOf()).toHaveLength(expectedOccurrences.length);
+    expect(runsOf().every((run) => run.status === "missed")).toBe(true);
+    expect(runsOf().map((run) => run.scheduledFor).sort()).toEqual([...expectedOccurrences].sort());
+    expect(runsOf().every((run) => run.outcomeSummary.includes("Configure a local execution command"))).toBe(true);
     expect(updated.tasks[0]?.nextRunAt).toBe(
       nextOccurrenceForRecurrence(recurrence, expectedOccurrences.at(-1))
     );
   });
 
   it("does not execute paused tasks until they are resumed", async () => {
-    const scheduler = new SchedulerService();
+    const scheduler = createScheduler();
     const task = await scheduler.createTask({
       workspacePath,
       name: "Morning summary",
@@ -209,7 +218,7 @@ describe("scheduler service integration", () => {
     await scheduler.tickWithoutDispatcher();
 
     const stillPaused = await loadWorkspaceLedger(workspacePath);
-    expect(stillPaused.runs).toHaveLength(0);
+    expect(runsOf()).toHaveLength(0);
     expect(stillPaused.tasks[0]?.enabled).toBe(false);
 
     const resumed = await scheduler.resumeTask(task.id, workspacePath);
@@ -222,11 +231,11 @@ describe("scheduler service integration", () => {
     await scheduler.tickWithoutDispatcher();
 
     const afterResume = await loadWorkspaceLedger(workspacePath);
-    expect(afterResume.runs[0]?.status).toBe("missed");
+    expect(runsOf()[0]?.status).toBe("missed");
   });
 
   it("deletes tasks so they are removed from the active list and never execute again", async () => {
-    const scheduler = new SchedulerService();
+    const scheduler = createScheduler();
     const task = await scheduler.createTask({
       workspacePath,
       name: "Weekly review",
@@ -248,11 +257,11 @@ describe("scheduler service integration", () => {
 
     const afterTick = await loadWorkspaceLedger(workspacePath);
     expect(afterTick.tasks).toHaveLength(0);
-    expect(afterTick.runs).toHaveLength(0);
+    expect(runsOf()).toHaveLength(0);
   });
 
   it("duplicates tasks and supports a manual run-now without waiting for the next occurrence", async () => {
-    const scheduler = new SchedulerService();
+    const scheduler = createScheduler();
     const task = await scheduler.createTask({
       workspacePath,
       name: "Morning summary",
@@ -273,12 +282,12 @@ describe("scheduler service integration", () => {
 
     const ledger = await loadWorkspaceLedger(workspacePath);
     expect(ledger.tasks).toHaveLength(2);
-    expect(ledger.runs).toHaveLength(1);
-    expect(ledger.runs[0]?.taskId).toBe(task.id);
+    expect(runsOf()).toHaveLength(1);
+    expect(runsOf()[0]?.taskId).toBe(task.id);
   });
 
   it("retries the latest failed run against the same workspace task", async () => {
-    const scheduler = new SchedulerService();
+    const scheduler = createScheduler();
     const task = await scheduler.createTask({
       workspacePath,
       name: "Retry target",
@@ -298,8 +307,8 @@ describe("scheduler service integration", () => {
     expect(retriedRun.retryOfRunId).toBe(failedRun.id);
 
     const ledger = await loadWorkspaceLedger(workspacePath);
-    expect(ledger.runs).toHaveLength(2);
-    expect(ledger.runs[0]?.id).toBe(retriedRun.id);
-    expect(ledger.runs[1]?.id).toBe(failedRun.id);
+    expect(runsOf()).toHaveLength(2);
+    expect(runsOf()[0]?.id).toBe(retriedRun.id);
+    expect(runsOf()[1]?.id).toBe(failedRun.id);
   });
 });

@@ -116,7 +116,6 @@ export interface WorkspaceLedger {
   workspaceKey: string;
   workspacePath: string;
   tasks: WorkspaceTask[];
-  runs: ScheduledRun[];
   executionProfile: ExecutionProfile | null;
   updatedAt: string;
 }
@@ -178,8 +177,6 @@ export interface CrossWorkspaceActionTarget {
   action: GlobalDashboardAction;
   runId?: string;
 }
-
-export const RUN_HISTORY_LIMIT = 500;
 
 export type RunEventType = "started" | "succeeded" | "failed" | "missed";
 export type RunEventSource = "scheduler" | "manual" | "retry" | "recovery" | "migrated";

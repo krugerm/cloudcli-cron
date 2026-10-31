@@ -39,11 +39,17 @@ export interface RunResponse {
   run: ScheduledRun;
 }
 
+export interface ListRunsResponse {
+  runs: ScheduledRun[];
+  nextCursor: string | null;
+}
+
 export interface WorkspaceStateResponse {
   capability: ExecutionCapability;
   executionProfile: ExecutionProfile | null;
   tasks: WorkspaceTask[];
   runs: ScheduledRun[];
+  runsNextCursor: string | null;
 }
 
 export interface ExecutionProfileResponse {

@@ -6,25 +6,15 @@ import type {
   GlobalDashboardStatusFilter,
   GlobalJobRecord,
   GlobalJobRunStatus,
-  ScheduledRun,
   WorkspaceAvailability,
   WorkspaceLedger,
   WorkspaceTask
 } from "../shared/model.js";
+import { workspaceKeyFromPath } from "../shared/workspace.js";
+import type { RunStore, TaskRunSummary } from "./run-store.js";
 import { listWorkspaceLedgerRecords, type WorkspaceLedgerRecord } from "./storage.js";
 
-function latestRunsByTaskId(runs: ScheduledRun[]): Map<string, ScheduledRun[]> {
-  const grouped = new Map<string, ScheduledRun[]>();
-  const sorted = [...runs].sort((left, right) => right.scheduledFor.localeCompare(left.scheduledFor));
-
-  for (const run of sorted) {
-    const existing = grouped.get(run.taskId) ?? [];
-    existing.push(run);
-    grouped.set(run.taskId, existing);
-  }
-
-  return grouped;
-}
+const EMPTY_SUMMARY: TaskRunSummary = { latest: null, latestFinished: null };
 
 function storedTaskStatus(task: WorkspaceTask): GlobalJobRunStatus {
   switch (task.lastRunStatus) {
@@ -40,10 +30,10 @@ function storedTaskStatus(task: WorkspaceTask): GlobalJobRunStatus {
 
 function deriveTaskStatus(
   task: WorkspaceTask,
-  runs: ScheduledRun[],
+  summary: TaskRunSummary,
   workspaceAvailability: WorkspaceAvailability
 ): GlobalJobRunStatus {
-  const latest = runs[0];
+  const latest = summary.latest;
   if (latest?.status === "running") {
     return "running";
   }
@@ -70,12 +60,11 @@ function deriveTaskStatus(
   }
 }
 
-function findLatestActionableRunId(runs: ScheduledRun[]): string | null {
-  const latest = runs[0];
+function findLatestActionableRunId(summary: TaskRunSummary): string | null {
+  const latest = summary.latest;
   if (!latest) {
     return null;
   }
-
   return latest.status === "failed" || latest.status === "missed" ? latest.id : null;
 }
 
@@ -92,11 +81,10 @@ function buildJobRecord(
   ledgerRecord: WorkspaceLedgerRecord,
   ledger: WorkspaceLedger,
   task: WorkspaceTask,
-  taskRuns: ScheduledRun[]
+  summary: TaskRunSummary
 ): GlobalJobRecord {
-  const lastRunStatus = deriveTaskStatus(task, taskRuns, ledgerRecord.status);
-  const latestActionableRunId = findLatestActionableRunId(taskRuns);
-  const latestFinishedRun = taskRuns.find((run) => run.finishedAt);
+  const lastRunStatus = deriveTaskStatus(task, summary, ledgerRecord.status);
+  const latestActionableRunId = findLatestActionableRunId(summary);
 
   return {
     taskId: task.id,
@@ -110,7 +98,7 @@ function buildJobRecord(
     enabled: task.enabled,
     nextRunAt: task.nextRunAt,
     lastRunStatus,
-    lastRunFinishedAt: latestFinishedRun?.finishedAt ?? null,
+    lastRunFinishedAt: summary.latestFinished?.finishedAt ?? null,
     latestActionableRunId,
     workspaceAvailability: ledgerRecord.status,
     availableActions: buildAvailableActions(task, latestActionableRunId)
@@ -218,7 +206,8 @@ function buildSummary(workspaces: WorkspaceLedgerRecord[], jobs: GlobalJobRecord
 }
 
 export async function buildGlobalDashboardSnapshot(
-  filter: GlobalDashboardFilter
+  filter: GlobalDashboardFilter,
+  runStore: RunStore
 ): Promise<GlobalDashboardSnapshot> {
   const workspaceRecords = await listWorkspaceLedgerRecords();
   const scopedWorkspaces = filter.workspaceKey
@@ -236,9 +225,12 @@ export async function buildGlobalDashboardSnapshot(
       continue;
     }
 
-    const runsByTask = latestRunsByTaskId(ledger.runs);
+    const summaries = runStore.taskRunSummaries(
+      workspaceKeyFromPath(ledger.workspacePath),
+      ledger.tasks.map((task) => task.id)
+    );
     for (const task of ledger.tasks) {
-      allJobs.push(buildJobRecord(workspace, ledger, task, runsByTask.get(task.id) ?? []));
+      allJobs.push(buildJobRecord(workspace, ledger, task, summaries.get(task.id) ?? EMPTY_SUMMARY));
     }
   }
 
@@ -273,7 +265,8 @@ export async function resolveGlobalWorkspacePath(workspaceKey: string): Promise<
 
 export async function resolveGlobalTask(
   workspaceKey: string,
-  taskId: string
+  taskId: string,
+  runStore: RunStore
 ): Promise<{ workspacePath: string; task: WorkspaceTask; latestActionableRunId: string | null }> {
   const workspace = (await listWorkspaceLedgerRecords()).find((entry) => entry.workspaceKey === workspaceKey);
   if (!workspace?.ledger) {
@@ -285,11 +278,11 @@ export async function resolveGlobalTask(
     throw new Error("Task not found");
   }
 
-  const latestActionableRunId = findLatestActionableRunId(
-    workspace.ledger.runs
-      .filter((run) => run.taskId === taskId)
-      .sort((left, right) => right.scheduledFor.localeCompare(left.scheduledFor))
-  );
+  const summary =
+    runStore
+      .taskRunSummaries(workspaceKeyFromPath(workspace.ledger.workspacePath), [taskId])
+      .get(taskId) ?? EMPTY_SUMMARY;
+  const latestActionableRunId = findLatestActionableRunId(summary);
 
   return {
     workspacePath: workspace.ledger.workspacePath,

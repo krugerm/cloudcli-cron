@@ -3,20 +3,24 @@ import path from "node:path";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { buildGlobalDashboardSnapshot } from "../../src/server/dashboard.js";
-import { saveWorkspaceLedger } from "../../src/server/storage.js";
+import type { RunStore } from "../../src/server/run-store.js";
+import { createTestRunStore, seedLedger } from "../helpers/seed.js";
 import { workspaceKeyFromPath } from "../../src/shared/workspace.js";
 
 describe("global dashboard aggregation", () => {
   let tempHome: string;
   let previousHome: string | undefined;
+  let store: RunStore;
 
   beforeEach(async () => {
     tempHome = await mkdtemp(path.join(os.tmpdir(), "scheduled-prompts-dashboard-"));
     previousHome = process.env.HOME;
     process.env.HOME = tempHome;
+    store = createTestRunStore();
   });
 
   afterEach(async () => {
+    store.close();
     process.env.HOME = previousHome;
     await rm(tempHome, { recursive: true, force: true });
   });
@@ -26,7 +30,7 @@ describe("global dashboard aggregation", () => {
     const workspaceKey = workspaceKeyFromPath(workspacePath);
     await mkdir(workspacePath, { recursive: true });
 
-    await saveWorkspaceLedger({
+    await seedLedger(store, {
       version: 1,
       workspaceKey,
       workspacePath,
@@ -77,7 +81,7 @@ describe("global dashboard aggregation", () => {
       "utf8"
     );
 
-    const snapshot = await buildGlobalDashboardSnapshot({ sortBy: "urgency" });
+    const snapshot = await buildGlobalDashboardSnapshot({ sortBy: "urgency" }, store);
 
     expect(snapshot.jobs).toHaveLength(1);
     expect(snapshot.jobs[0]?.workspaceKey).toBe(workspaceKey);
@@ -96,7 +100,7 @@ describe("global dashboard aggregation", () => {
     await mkdir(firstWorkspacePath, { recursive: true });
     await mkdir(secondWorkspacePath, { recursive: true });
 
-    await saveWorkspaceLedger({
+    await seedLedger(store, {
       version: 1,
       workspaceKey: firstKey,
       workspacePath: firstWorkspacePath,
@@ -140,7 +144,7 @@ describe("global dashboard aggregation", () => {
       updatedAt: "2026-04-27T08:00:00.000Z"
     });
 
-    await saveWorkspaceLedger({
+    await seedLedger(store, {
       version: 1,
       workspaceKey: secondKey,
       workspacePath: secondWorkspacePath,
@@ -184,7 +188,7 @@ describe("global dashboard aggregation", () => {
       updatedAt: "2026-04-27T08:00:00.000Z"
     });
 
-    const snapshot = await buildGlobalDashboardSnapshot({ sortBy: "urgency", status: "problem" });
+    const snapshot = await buildGlobalDashboardSnapshot({ sortBy: "urgency", status: "problem" }, store);
 
     expect(snapshot.jobs).toHaveLength(1);
     expect(snapshot.jobs[0]?.taskId).toBe("task-failed");
@@ -196,7 +200,7 @@ describe("global dashboard aggregation", () => {
     const workspaceKey = workspaceKeyFromPath(workspacePath);
     await mkdir(workspacePath, { recursive: true });
 
-    await saveWorkspaceLedger({
+    await seedLedger(store, {
       version: 1,
       workspaceKey,
       workspacePath,
@@ -254,7 +258,7 @@ describe("global dashboard aggregation", () => {
       updatedAt: "2026-04-27T08:00:00.000Z"
     });
 
-    const snapshot = await buildGlobalDashboardSnapshot({ sortBy: "urgency" });
+    const snapshot = await buildGlobalDashboardSnapshot({ sortBy: "urgency" }, store);
 
     expect(snapshot.jobs).toHaveLength(1);
     expect(snapshot.jobs[0]?.latestActionableRunId).toBeNull();
@@ -266,7 +270,7 @@ describe("global dashboard aggregation", () => {
     const workspaceKey = workspaceKeyFromPath(workspacePath);
     await mkdir(workspacePath, { recursive: true });
 
-    await saveWorkspaceLedger({
+    await seedLedger(store, {
       version: 1,
       workspaceKey,
       workspacePath,
@@ -295,7 +299,7 @@ describe("global dashboard aggregation", () => {
       updatedAt: "2026-04-27T08:00:00.000Z"
     });
 
-    const snapshot = await buildGlobalDashboardSnapshot({ sortBy: "urgency" });
+    const snapshot = await buildGlobalDashboardSnapshot({ sortBy: "urgency" }, store);
 
     expect(snapshot.jobs).toHaveLength(1);
     expect(snapshot.jobs[0]?.lastRunStatus).toBe("failed");
@@ -307,7 +311,7 @@ describe("global dashboard aggregation", () => {
     const workspaceKey = workspaceKeyFromPath(workspacePath);
     await mkdir(workspacePath, { recursive: true });
 
-    await saveWorkspaceLedger({
+    await seedLedger(store, {
       version: 1,
       workspaceKey,
       workspacePath,
@@ -351,7 +355,7 @@ describe("global dashboard aggregation", () => {
       updatedAt: "2026-04-27T08:00:00.000Z"
     });
 
-    const snapshot = await buildGlobalDashboardSnapshot({ sortBy: "urgency", status: "running" });
+    const snapshot = await buildGlobalDashboardSnapshot({ sortBy: "urgency", status: "running" }, store);
 
     expect(snapshot.jobs).toHaveLength(1);
     expect(snapshot.jobs[0]?.lastRunStatus).toBe("running");
@@ -363,7 +367,7 @@ describe("global dashboard aggregation", () => {
     const workspaceKey = workspaceKeyFromPath(workspacePath);
     await mkdir(workspacePath, { recursive: true });
 
-    await saveWorkspaceLedger({
+    await seedLedger(store, {
       version: 1,
       workspaceKey,
       workspacePath,
@@ -407,10 +411,10 @@ describe("global dashboard aggregation", () => {
       updatedAt: "2026-04-27T08:00:00.000Z"
     });
 
-    const baseline = await buildGlobalDashboardSnapshot({ sortBy: "urgency" });
+    const baseline = await buildGlobalDashboardSnapshot({ sortBy: "urgency" }, store);
     expect(baseline.summary.problemJobs).toBe(0);
 
-    const filtered = await buildGlobalDashboardSnapshot({ sortBy: "urgency", status: "problem" });
+    const filtered = await buildGlobalDashboardSnapshot({ sortBy: "urgency", status: "problem" }, store);
     expect(filtered.jobs).toHaveLength(0);
   });
 
@@ -419,7 +423,7 @@ describe("global dashboard aggregation", () => {
     const workspaceKey = workspaceKeyFromPath(workspacePath);
     await mkdir(workspacePath, { recursive: true });
 
-    await saveWorkspaceLedger({
+    await seedLedger(store, {
       version: 1,
       workspaceKey,
       workspacePath,
@@ -450,7 +454,7 @@ describe("global dashboard aggregation", () => {
 
     await rm(workspacePath, { recursive: true, force: true });
 
-    const snapshot = await buildGlobalDashboardSnapshot({ sortBy: "urgency" });
+    const snapshot = await buildGlobalDashboardSnapshot({ sortBy: "urgency" }, store);
 
     expect(snapshot.jobs).toHaveLength(1);
     expect(snapshot.jobs[0]?.workspaceAvailability).toBe("unavailable");

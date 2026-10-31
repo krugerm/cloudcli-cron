@@ -5,6 +5,7 @@ import type {
   GlobalDashboardResponse,
   GlobalDashboardRetryRequest,
   ExecutionProfileResponse,
+  ListRunsResponse,
   RunResponse,
   TaskResponse,
   WorkspaceStateResponse
@@ -20,6 +21,7 @@ import {
 import type { ExecutionCapability, ExecutionProfile } from "../shared/model.js";
 import { buildGlobalDashboardSnapshot, readGlobalTaskState, resolveGlobalTask } from "./dashboard.js";
 import { HttpError } from "./http-error.js";
+import type { RunStore } from "./run-store.js";
 import { resolveExecutionCapability } from "./settings.js";
 import { SchedulerService } from "./scheduler.js";
 
@@ -59,7 +61,7 @@ async function loadTaskAfterAction(
   return readGlobalTaskState(workspaceKey, taskId);
 }
 
-export function createHttpHandler(scheduler: SchedulerService): http.RequestListener {
+export function createHttpHandler(scheduler: SchedulerService, runStore: RunStore): http.RequestListener {
   return async (request, response) => {
     try {
       if (!request.url || !request.method) {
@@ -89,7 +91,8 @@ export function createHttpHandler(scheduler: SchedulerService): http.RequestList
 
       if (request.method === "GET" && url.pathname === "/v1/global-dashboard") {
         const payload: GlobalDashboardResponse = await buildGlobalDashboardSnapshot(
-          parseGlobalDashboardQuery(url.searchParams)
+          parseGlobalDashboardQuery(url.searchParams),
+          runStore
         );
         json(response, 200, payload);
         return;
@@ -102,7 +105,8 @@ export function createHttpHandler(scheduler: SchedulerService): http.RequestList
         }
         const limitValue = url.searchParams.get("limit");
         const limit = limitValue ? Number(limitValue) : undefined;
-        json(response, 200, { runs: await scheduler.listRuns(workspacePath, limit) });
+        const page = await scheduler.listRuns(workspacePath, { limit });
+        json(response, 200, { runs: page.runs, nextCursor: page.nextCursor } satisfies ListRunsResponse);
         return;
       }
 
@@ -188,7 +192,7 @@ export function createHttpHandler(scheduler: SchedulerService): http.RequestList
       ) {
         const workspaceKey = segments[2];
         const taskId = segments[3];
-        const target = await resolveGlobalTask(workspaceKey, taskId);
+        const target = await resolveGlobalTask(workspaceKey, taskId, runStore);
 
         switch (segments[5]) {
           case "run-now": {
@@ -230,8 +234,8 @@ export function createHttpHandler(scheduler: SchedulerService): http.RequestList
   };
 }
 
-export async function startHttpServer(scheduler: SchedulerService): Promise<http.Server> {
-  const server = http.createServer(createHttpHandler(scheduler));
+export async function startHttpServer(scheduler: SchedulerService, runStore: RunStore): Promise<http.Server> {
+  const server = http.createServer(createHttpHandler(scheduler, runStore));
   await new Promise<void>((resolve) => {
     server.listen(0, "127.0.0.1", () => resolve());
   });
