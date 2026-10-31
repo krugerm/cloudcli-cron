@@ -21,6 +21,11 @@
 - Q: Where does a task's last run status come from once runs leave the JSON file? → A: It is derived from the run history whenever tasks are served, and no longer stored.
 - Q: How are task edits protected from being overwritten by a finishing run? → A: Task changes go through a per-workspace lock that reloads the file before writing, and a finishing run writes nothing to the task file.
 
+### Session 2026-10-31 (second design review)
+
+- Q: How is a scheduled occurrence prevented from running twice when ticks overlap? → A: Each occurrence is claimed under the per-workspace lock only if the freshly loaded task is enabled and its next run time still equals that occurrence.
+- Q: What status does an upgraded task show if the old cap removed all its runs? → A: Its last stored status, kept as a legacy value until it runs again.
+
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 - Keep every run (Priority: P1)
@@ -87,6 +92,9 @@ A user upgrading from v0.2.0 keeps all runs previously stored in the workspace J
 - A task is paused, edited or deleted while one of its runs is executing: the change survives the end of the run.
 - An error while processing one workspace during a scheduler tick: other workspaces are still processed and the plugin server keeps running.
 - A retry request names a run from a different workspace: it is rejected as "Run not found".
+- A v0.2.0 task whose runs were all pushed out by the old cap: it keeps its last known status instead of showing "never run".
+- A workspace file whose name does not match its workspace path: it is renamed during import; if another file already has that name, both are left untouched and the conflict is logged.
+- A run with an unknown status in a v0.2.0 file: it is skipped and counted; the rest of the file imports.
 - `runs.db` cannot be opened or is from a newer plugin version: the plugin server stops at startup with the file path and reason.
 - Node older than 22.13, or 23.0–23.3: the plugin server stops at startup with "Scheduled Prompt needs Node 22.13+ (found X)".
 - Several runs share the same scheduled time: paging neither skips nor repeats them.
@@ -100,7 +108,7 @@ A user upgrading from v0.2.0 keeps all runs previously stored in the workspace J
 - **FR-002**: The database MUST reject updates and deletes of recorded events.
 - **FR-003**: The system MUST derive each run's current state (status, start time, finish time, summary, failure reason) from its events and expose it in the existing run format, so existing API consumers keep working.
 - **FR-004**: The system MUST NOT cap or prune run history.
-- **FR-005**: The run list API MUST support cursor paging (`before`) and an optional `taskId` filter, and return a `nextCursor`; callers that pass neither MUST receive the newest runs as today.
+- **FR-005**: The run list API MUST support cursor paging (`before`) and an optional `taskId` filter, and return a `nextCursor`; callers that pass neither MUST receive the newest runs, newest first. Without `limit`, the default page size changes from 500 to 100.
 - **FR-006**: The system MUST expose a run's events in order through `GET /v1/runs/:id/events`.
 - **FR-007**: On startup, the system MUST close every run left in progress with a `failed` event marked as recovery.
 - **FR-008**: On startup, the system MUST import runs from v0.2.0 workspace files into `runs.db`, keep a backup of each file, and remove `runs` from the workspace file. The import MUST be safe to repeat.
@@ -111,7 +119,9 @@ A user upgrading from v0.2.0 keeps all runs previously stored in the workspace J
 - **FR-013**: A task's last run status MUST be derived from the run history, not stored separately, so it can never disagree with the runs.
 - **FR-014**: Changes to a task made while one of its runs executes MUST NOT be overwritten when the run finishes.
 - **FR-015**: A failure while processing one workspace in a scheduler tick MUST NOT stop other workspaces or terminate the plugin server.
-- **FR-016**: Run lookups for retry and history MUST be limited to the requesting workspace.
+- **FR-016**: Run lookups for retry and history MUST be limited to the requesting workspace, and a run from another workspace MUST be reported as not found (HTTP 404).
+- **FR-017**: Each scheduled occurrence MUST execute at most once, even when scheduler ticks overlap, and MUST NOT execute after the user has rescheduled, paused or deleted its task.
+- **FR-018**: A task whose v0.2.0 runs were all removed by the old 500-run cap MUST keep showing its last known status after upgrade, until it runs again.
 
 ### Key Entities *(include if feature involves data)*
 
