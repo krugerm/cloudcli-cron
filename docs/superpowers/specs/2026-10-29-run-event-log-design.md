@@ -1,6 +1,6 @@
 # Run Event Log — Design
 
-**Date:** 2026-10-29 (revised 2026-10-31 after six review rounds)
+**Date:** 2026-10-29 (revised 2026-10-31 after seven review rounds)
 **Branch:** `003-run-event-log`
 **Spec-kit spec:** [`specs/003-run-event-log/spec.md`](../../../specs/003-run-event-log/spec.md)
 **Follow-up:** `004-cron-expressions` builds on this branch.
@@ -84,9 +84,9 @@ CREATE INDEX ix_events_run        ON run_events (run_id, seq);
 -- Workspace run pages (creation order)
 CREATE INDEX ix_events_ws_page    ON run_events (workspace_key, seq DESC);
 -- Per-task run pages and dashboard summaries (creation order)
-CREATE INDEX ix_events_task_page  ON run_events (task_id, seq DESC);
+CREATE INDEX ix_events_task_page  ON run_events (workspace_key, task_id, seq DESC);
 -- Duplicate-occurrence check
-CREATE INDEX ix_events_occurrence ON run_events (occurrence_key);
+CREATE INDEX ix_events_occurrence ON run_events (workspace_key, occurrence_key);
 -- Crash recovery: only 'started' events, so the scan does not grow with summaries
 CREATE INDEX ix_events_started    ON run_events (run_id, seq) WHERE type = 'started';
 
@@ -190,10 +190,10 @@ export class RunStore {
   appendEvents(events: NewRunEvent[]): void;             // one transaction; used by migration and recovery
   getRun(runId: string): ScheduledRun | null;
   hasRun(runId: string): boolean;
-  hasOccurrence(occurrenceKey: string): boolean;
+  hasOccurrence(workspaceKey: string, occurrenceKey: string): boolean;
   listRuns(workspaceKey: string, opts?: { limit?: number; before?: string | null; taskId?: string }): RunPage;
   listEvents(runId: string): RunEvent[];
-  taskRunSummaries(taskIds: string[]): Map<string, TaskRunSummary>;
+  taskRunSummaries(workspaceKey: string, taskIds: string[]): Map<string, TaskRunSummary>;
   recoverInterruptedRuns(now: string): number;           // returns runs closed
   close(): void;
 }
@@ -206,8 +206,9 @@ export class RunStore {
   2. Load all events for those run IDs (`WHERE run_id IN (...) ORDER BY run_id, seq`) and `foldRun` each.
   3. If `limit + 1` rows came back, drop the last and set `nextCursor` from the last kept run.
 - **Cursor**: the `sequence` of the last run on the page, as a decimal string. Anything that is not a positive integer is a 400 error. Measured at 500k events: 0.23 ms for a workspace page (first or deep), 0.09 ms for a task page.
-- **`taskRunSummaries`**: per task, the first-event query filtered by `task_id = ?` only (no `workspace_key` condition; task IDs are UUIDs), in pages of 5. `latest` is the first run returned; `latestFinished` is the first returned run with `finishedAt` set, fetching further pages until found or exhausted (normally one page). It uses the run order defined in §1, so the dashboard's "latest" is the run at the top of that task's Recent Runs.
-- **`hasOccurrence`**: `SELECT 1 FROM run_events WHERE occurrence_key = ? LIMIT 1`.
+- **Every query is scoped by `workspace_key`**, including per-task and per-occurrence lookups: a copied ledger file can share task IDs with its original, and its runs must never count for the other workspace.
+- **`taskRunSummaries`**: per task, the first-event query filtered by `workspace_key = ? AND task_id = ?`, in pages of 5. `latest` is the first run returned; `latestFinished` is the first returned run with `finishedAt` set, fetching further pages until found or exhausted (normally one page). It uses the run order defined in §1, so the dashboard's "latest" is the run at the top of that task's Recent Runs.
+- **`hasOccurrence`**: `SELECT 1 FROM run_events WHERE workspace_key = ? AND occurrence_key = ? LIMIT 1`.
 - **`recoverInterruptedRuns`**: the `ix_events_started` query in §1, then `appendEvents` in one transaction.
 
 `limit` defaults to `RUN_PAGE_SIZE = 100` and is clamped to 1–500. `RUN_HISTORY_LIMIT` is removed.
@@ -221,7 +222,7 @@ export class RunStore {
 3. Dynamically import `./server/run-store.js` and open `RunStore` at `<dataRoot>/runs.db`. On failure, write the path and SQLite message to stderr and exit 1.
 4. `const frozenKeys = await migrateLedgerRuns(runStore)` (§3), then `setFrozenWorkspaceKeys(frozenKeys)` (new, `storage.ts`), which `listWorkspaceLedgerRecords` reads.
 5. `runStore.recoverInterruptedRuns(now)`.
-6. Construct `SchedulerService(executionAdapter, runStore, frozenKeys)` (`frozenKeys` defaults to an empty set, so tests pass only the store) and `startHttpServer(scheduler, runStore)`.
+6. Construct `SchedulerService(executionAdapter, runStore, frozenKeys)` (`frozenKeys` defaults to an empty set, so tests pass only the store; tests that call `setFrozenWorkspaceKeys` reset it to an empty set afterwards) and `startHttpServer(scheduler, runStore)`.
 7. Start the 30 s tick: `setInterval(() => { scheduler.tickWithoutDispatcher().catch(logTickError) }, 30_000)`.
 
 Every module other than `server.ts` imports `RunStore` with `import type`, so `node:sqlite` is not loaded before steps 1–2.
@@ -236,7 +237,7 @@ Everywhere — runtime and migration — an event's `workspace_key` is `workspac
 
 - `WorkspaceTask.lastRunStatus` stays in the API type. **Every** response that returns a `WorkspaceTask` (workspace state, task create/update/pause/resume/duplicate, `readGlobalTaskState`, `resolveGlobalTask`, global-dashboard actions) fills it on a copy of the task — never on the ledger object inside `fn`, so serving a task never changes the file — as `latest?.status ?? task.legacyLastRunStatus ?? null`, with `latest` from `taskRunSummaries`. `updateTask` ignores any `lastRunStatus` or `legacyLastRunStatus` in the request.
 - New optional stored field `WorkspaceTask.legacyLastRunStatus?: RunStatus | null`. Only the migration sets it (§3), and only for tasks that had a non-null `lastRunStatus` but no imported runs (their runs were pushed out by the old 500-run cap). It is never written afterwards, and is ignored once the task has any run in `runs.db`. New tasks never have it: `createTask` does not set it, and `duplicateTask` (which spreads `...source`, `scheduler.ts:193–201`) deletes it from the copy.
-- `saveWorkspaceLedger` writes `lastRunStatus: null` (v2 files never carry a real value). The task guard (`storage.ts:91`) accepts `lastRunStatus` and `legacyLastRunStatus` missing, `null` or a string.
+- `saveWorkspaceLedger` writes `lastRunStatus: null` (v2 files never carry a real value). The task guard (`storage.ts:91`) accepts `lastRunStatus` and `legacyLastRunStatus` missing, `null` or a string, and task coercion in `coerceLedgerShape` copies `legacyLastRunStatus` through when it is a `RunStatus`, so loads and saves keep it.
 - `dashboard.ts` `deriveTaskStatus` uses `TaskRunSummary.latest`. `storedTaskStatus` stays as the no-runs fallback but reads `legacyLastRunStatus` (absent → `never_run`). `lastRunFinishedAt` uses `latestFinished`. `findLatestActionableRunId` uses `latest`.
 
 ### Ledger writes are serialized and never span an execution
@@ -275,7 +276,7 @@ Rules:
 | Location | Today | After |
 |---|---|---|
 | `scheduler.ts:287–313` tick loop | ledger loaded once per workspace, saved at end | per workspace: `try { … } catch (e) { logTickError(e) }`; each due occurrence is one claim (below); no save at the end |
-| `scheduler.ts:292` occurrence check | `ledger.runs.some(...)` | inside the claim: `runStore.hasOccurrence(key)` |
+| `scheduler.ts:292` occurrence check | `ledger.runs.some(...)` | inside the claim: `runStore.hasOccurrence(workspaceKey, key)` |
 | `scheduler.ts:325` missed | build run, `trimRuns`, set `lastRunStatus`, save | inside the claim: `appendEvent({ type: "missed", source: "scheduler" })` |
 | `scheduler.ts:351` blocked | build run, `trimRuns`, set `lastRunStatus`, save | scheduled: inside the claim as `missed`; manual/retry: `appendEvent({ type: "failed" })` |
 | `scheduler.ts:367–371` start | push `running` run, set status, save | see **Claiming a scheduled occurrence** below |
@@ -284,8 +285,8 @@ Rules:
 | `scheduler.ts:226` retry lookup | `ledger.runs.find` | `runStore.getRun(id)` plus the workspace check in §2 "HTTP status codes"; `source: "retry"` |
 | `scheduler.ts:107` workspace state | all runs | `listRuns(key)` first page + `runsNextCursor` |
 | `scheduler.ts:113` `listRuns` | slice of all runs | `runStore.listRuns(key, opts)` |
-| `dashboard.ts:239` | group `ledger.runs` | `runStore.taskRunSummaries(ledger.tasks.map(t => t.id))` |
-| `dashboard.ts:289` | filter `ledger.runs` | `runStore.taskRunSummaries([taskId])` |
+| `dashboard.ts:239` | group `ledger.runs` | `runStore.taskRunSummaries(workspaceKey, ledger.tasks.map(t => t.id))` |
+| `dashboard.ts:289` | filter `ledger.runs` | `runStore.taskRunSummaries(workspaceKey, [taskId])` |
 | `trimRuns`, `sortRunsDesc`, `latestRunsByTaskId` | | deleted |
 
 ### Claiming a scheduled occurrence
@@ -298,7 +299,7 @@ For each task the tick sees as due, with `scheduledFor = <the tick's view of tas
    - `task` exists and `task.enabled`;
    - `task.nextRunAt === scheduledFor` (the user has not rescheduled, and no other tick has advanced it).
 
-   If either fails, change nothing and skip this occurrence. If both hold but the occurrence is already known (`inFlightOccurrences.has(key) || runStore.hasOccurrence(key)`), set `task.nextRunAt = computeTaskNextRun(task, scheduledFor)` and skip execution; this is today's `alreadyTracked` branch (`scheduler.ts:294`). Otherwise, still inside the lock:
+   If either fails, change nothing and skip this occurrence. If both hold but the occurrence is already known (`inFlightOccurrences.has(key) || runStore.hasOccurrence(workspaceKey, key)`), set `task.nextRunAt = computeTaskNextRun(task, scheduledFor)` and skip execution; this is today's `alreadyTracked` branch (`scheduler.ts:294`). Otherwise, still inside the lock:
    - set `task.nextRunAt = computeTaskNextRun(task, scheduledFor)` from the fresh task;
    - if the execution profile is not ready, or `tickStartedAt - scheduledFor > 90 s` (today's grace window and reference time, `scheduler.ts:300`): `appendEvent({ type: "missed", source: "scheduler" })` and finish (no execution);
    - otherwise add `key` to `inFlightOccurrences` and `appendEvent({ type: "started", source: "scheduler", executionRequest })`.
@@ -308,9 +309,9 @@ Because the claim checks `nextRunAt === scheduledFor` and advances it atomically
 
 Failure handling:
 
-- The claim throws before saving (reload or `appendEvent` failure): the lock's save does not happen, `nextRunAt` is unchanged, `key` is removed from `inFlightOccurrences`, and the next tick retries.
-- The save at the end of the claim throws after `missed` was appended: nothing else to do; on the next tick `nextRunAt` still equals `scheduledFor`, `hasOccurrence(key)` is true, and the `alreadyTracked` branch advances it.
-- The save at the end of the claim throws after `started` was appended (the claim sets a local `startedAppended` flag immediately after that `appendEvent` returns, and the tick checks it): the run is recorded and not executed. The tick removes `key` from `inFlightOccurrences` and appends `failed` (`summary` and `failure_reason`: "Could not save the schedule; run not started."). On the next tick `nextRunAt` still equals `scheduledFor` and `hasOccurrence(key)` is true, so the `alreadyTracked` branch advances `nextRunAt` without running it twice.
+- The claim throws before saving (reload or `appendEvent` failure): the lock's save does not happen, `nextRunAt` is unchanged, `key` is removed from `inFlightOccurrences` if this claim added it, and the next tick retries.
+- The save at the end of the claim throws after `missed` was appended: nothing else to do; on the next tick `nextRunAt` still equals `scheduledFor`, `hasOccurrence(workspaceKey, key)` is true, and the `alreadyTracked` branch advances it.
+- The save at the end of the claim throws after `started` was appended (the claim sets a local `startedAppended` flag immediately after that `appendEvent` returns, and the tick checks it): the run is recorded and not executed. The tick removes `key` from `inFlightOccurrences` and appends `failed` (`summary` and `failure_reason`: "Could not save the schedule; run not started."). On the next tick `nextRunAt` still equals `scheduledFor` and `hasOccurrence(workspaceKey, key)` is true, so the `alreadyTracked` branch advances `nextRunAt` without running it twice.
 - The final `appendEvent` after execution throws: the run stays `started` until the next startup's recovery closes it.
 
 **Manual runs and retries** (`createManualRun`, `retryRun`) do not claim: they do not move `nextRunAt` and use a fresh `scheduledFor = now`. Their occurrence key is `` `${taskId}:manual:${runId}` `` (today's `occurrenceKeyForTask` format is `${taskId}:${scheduledFor}`), so it can never equal a scheduled occurrence's key. They add that key to `inFlightOccurrences`, append `started` with `source: "manual"` or `"retry"`, execute, and append the final event.
@@ -365,7 +366,7 @@ The complete list of `HttpError(404, "Run not found")` cases:
 2. **Key and target path.** `workspaceKey = workspaceKeyFromPath(file.workspacePath)` (the rule in §2 "Workspace key rule"); `targetPath = <dataRoot>/<workspaceKey>.json`, the path `loadWorkspaceLedger` uses at runtime (`storage.ts:27`). If `workspacePath` is missing or not a string, skip the file and log to stderr. If `targetPath` differs from the file's path and a file already exists at `targetPath`:
    - if the file at `targetPath` has `migratedFrom` equal to this file's name, this file is the leftover of an interrupted step 5: delete it and move on;
    - otherwise log "ledger name conflict: <file> vs <targetPath>" and skip the file (both stay untouched).
-3. **Events.** Timestamps (`scheduledFor`, `startedAt`, `finishedAt`) are normalized with `new Date(x).toISOString()`; a run with an unparsable timestamp counts as invalid (below). Runs are processed in ascending `scheduledFor`, then ascending `startedAt` (missing first), then position in the file, so their `sequence` follows schedule order and a retry sorts after its original. Among entries that pass validation, the first in this processing order with a given `id` is imported; later entries with that `id` count as invalid. An `id` already in the store from **another** file is also counted as invalid and logged ("run id already imported from <other workspace key>"); an `id` already in the store from this file's own earlier, interrupted import is skipped silently (that is the idempotence path). For every run that passes the existing `isRunEntry` check and whose `id` is not already in the store (`hasRun`), build events with `source='migrated'` and the run's original `id`, `occurrenceKey`, `taskId`, `scheduledFor`, `retryOfRunId`:
+3. **Events.** Timestamps (`scheduledFor`, `startedAt`, `finishedAt`) are normalized with `new Date(x).toISOString()`; a run with an unparsable timestamp counts as invalid (below). Runs are processed in ascending recording time — `startedAt ?? finishedAt ?? scheduledFor` — then position in the file, so their `sequence` follows the order they were recorded in v0.2.0, matching §1's newest-recorded-first order (a retry recorded after a later run stays above it). Among entries that pass validation, the first in this processing order with a given `id` is imported; later entries with that `id` count as invalid. An `id` already in the store from **another** file is also counted as invalid and logged ("run id already imported from <other workspace key>"); an `id` already in the store from this file's own earlier, interrupted import is skipped silently (that is the idempotence path). For every run that passes the existing `isRunEntry` check and whose `id` is not already in the store (`hasRun`), build events with `source='migrated'` and the run's original `id`, `occurrenceKey`, `taskId`, `scheduledFor`, `retryOfRunId`:
    - status `succeeded`/`failed`/`missed`: a `started` event at `startedAt` with `executionRequest` and `summary: "Command started."` (today's `createRunningRun` text) if `startedAt` is set; then the final event at `finishedAt` with the run's `outcomeSummary` and `failureReason`. If `finishedAt` is null (never written by v0.2.0 for these statuses), use `startedAt`, then `scheduledFor`.
    - status `running`: `started` at `startedAt ?? scheduledFor`; then `failed` with `source='recovery'`, `at` = migration time, the recovery summary from §1.
    - status `scheduled` or `canceled` (never written by v0.2.0): counted as invalid.
@@ -377,7 +378,7 @@ The complete list of `HttpError(404, "Run not found")` cases:
    - `workspacePath` (top-level and per task) set to `normalizeWorkspacePath(file.workspacePath)`;
    - top-level `workspaceKey` and every task's `workspaceKey` set to the derived `workspaceKey` from step 2 (otherwise `coerceLedgerShape` reports "workspace key was repaired from the filename" and marks the workspace `partial`, `storage.ts:161`, `:215`);
    - if `targetPath` differs from the file that was read: `migratedFrom: "<original file name>"`;
-   - each task: `lastRunStatus: null`, and `legacyLastRunStatus` set only when the task has no run in the store after step 4 and the file's `lastRunStatus` is a `RunStatus` other than `running` (field defined in §2 "`lastRunStatus` is derived, not stored").
+   - each task: `lastRunStatus: null`, and `legacyLastRunStatus` set only when the task has no run **for this workspace** in the store after step 4 and the file's `lastRunStatus` is a non-null `RunStatus`; a stored `running` becomes `failed`, matching crash recovery (field defined in §2 "`lastRunStatus` is derived, not stored").
 
    Write it to `<targetPath>.tmp` (not matched by the `*.json` scan), then rename to `targetPath`. If `targetPath` differs from the file that was read, delete the original after the rename. A crash between rename and delete leaves the original; step 2's leftover rule removes it on the next startup because the target names it in `migratedFrom`.
 
@@ -410,10 +411,10 @@ Idempotence: a crash between steps 4 and 5 leaves `runs` in the file; the next s
 - State gains `runsNextCursor: string | null` and `runsTaskFilter: string | null`.
 - **Task filter.** Recent Runs gets a select: "All tasks" plus each task name. Changing it reloads the first page with `taskId`.
 - **Load older runs.** Shown when `runsNextCursor` is set. Calls `GET /v1/runs?workspacePath=<path>&before=<cursor>&limit=100[&taskId=]`, appends results, updates the cursor. Disabled while loading; on error, shows the message inline and stays enabled.
-- **History toggle.** Per run. **Every** open calls `GET /v1/runs/:id/events?workspacePath=<path>` (no cache, so a run opened while `running` shows its final event the next time it is opened) and lists events as `<type> · <local time> · <source>`. `migrated` and `recovery` are labelled. When the response's `retryOf` is set, a line "Retry of run scheduled for <retryOf.scheduledFor, local time>" is shown above the events.
+- **History toggle.** Per run. **Every** open calls `GET /v1/runs/:id/events?workspacePath=<path>` (no cache, so a run opened while `running` shows its final event the next time it is opened); a response is shown only if it belongs to the most recent open of that toggle and lists events as `<type> · <local time> · <source>`. `migrated` and `recovery` are labelled. When the response's `retryOf` is set, a line "Retry of run scheduled for <retryOf.scheduledFor, local time>" is shown above the events.
 - **Refresh after actions.** Run Now, Retry, `reconcileWorkspaceState` (`app.ts:692`) and the global-dashboard action path (`app.ts:592`, `:667`) refresh the list by **reloading it**: `GET /v1/runs?workspacePath=<path>[&taskId=<filter>]&limit=<n>`, where `n` = the number of runs currently shown, at least 100 and at most 500 (the API maximum). The response replaces the list and the cursor. Run Now and Retry no longer insert their returned run into the list (today's prepend at `app.ts:982`, `:1003` is removed); the reload brings it in. The global-dashboard path reloads only when the action's workspace is the loaded one, as today (`app.ts:590`). There is no client-side merge: because runs are in creation order (§1), a reload of the top `n` runs is always a consistent prefix of the history, and "Load older" continues from its cursor.
 - **List generation.** State gains `runsGeneration: number`. Workspace switch, first load, filter change and every reload increment it **when the request is sent**, and record the new value with the request. "Load older" does not increment it; it records the current value. A response is applied only if its recorded generation still equals `runsGeneration`; a Load older response additionally requires that its `before` still equals the current `runsNextCursor` (a reload sent before it may have moved the cursor). Otherwise it is dropped. So a Load older response is dropped once any reload, filter change or workspace switch has been sent after it, and only the most recently sent reload can replace the list (no older state can overwrite a newer one).
-- **`loadFromContext`** (workspace switch, `app.ts:542`, first load, and the refresh paths above) loads tasks and status from the workspace-state response as today, but **ignores its `runs` and `runsNextCursor`**. The run list always comes from a separate, generation-tagged `GET /v1/runs?workspacePath=<path>&limit=<n>[&taskId=<filter>]` (first load and workspace switch: `n` = 100). A workspace switch also resets `runsTaskFilter` to `null`. Task and status data are applied as today regardless of the generation check, which covers only the run list.
+- **`loadFromContext`** (workspace switch, `app.ts:542`, first load, and the refresh paths above) loads tasks and status from the workspace-state response as today, but **ignores its `runs` and `runsNextCursor`**. The run list always comes from one separate, generation-tagged `GET /v1/runs?workspacePath=<path>&limit=<n>[&taskId=<filter>]` per refresh — the same request described under "Refresh after actions", not a second one (first load and workspace switch: `n` = 100). For a frozen workspace the workspace-state request returns 409 and the view shows that message in its existing error state. A workspace switch also resets `runsTaskFilter` to `null`. Task and status data are applied as today regardless of the generation check, which covers only the run list.
 - The client uses `ListRunsResponse` from `contracts.ts` (`RunPage` is server-internal).
 
 ## 4. Testing and rollout
@@ -447,6 +448,9 @@ Idempotence: a crash between steps 4 and 5 leaves `runs` in the file; the next s
 - a file without `runs` is untouched; a second run is a no-op;
 - an import that fails (e.g. `appendEvents` throws) leaves the file with `runs` and its derived key in `frozenKeys`: `unavailable`, skipped by the tick, edits, Run Now and Retry → 409; for a misnamed file, opening its workspace creates no `<derivedKey>.json`; the next start imports it;
 - a run `id` present in two workspaces' files: imported for the first, counted invalid and logged for the second;
+- a copied ledger (same task IDs, different workspace path): each workspace's `taskRunSummaries`, `hasOccurrence` and `legacyLastRunStatus` see only its own runs;
+- `legacyLastRunStatus` survives a load/save round trip; a stored `running` becomes `failed`;
+- import order: a v0.2.0 retry recorded after a later run has the higher `sequence`;
 - duplicate run `id`s in one file: first imported, rest counted invalid;
 - an unknown run `status` is skipped and counted, and the rest of the file imports;
 - a task whose runs were all pushed out by the old cap gets `legacyLastRunStatus`; a task with imported runs does not;
@@ -510,5 +514,7 @@ These files read or seed `runs` and change as follows:
 - Pruning or exporting history. At 2–3 GB/year per every-minute task, a retention option is the likely next feature.
 - Cron expressions (`004-cron-expressions`).
 - Removing events of deleted workspaces or tasks.
+- A pause or delete that lands after a claim has released the lock but before the adapter starts: that one run still executes (the window is the time between the claim's save and the adapter call).
+- `latestFinished` is the newest-*recorded* run with `finishedAt`, not the most recently finished one; `lastRunFinishedAt` can therefore move backwards after a long manual run.
 - Two plugin server processes on one data directory (CloudCLI starts one per plugin). A second process's startup recovery would close the first's in-progress runs.
 - The tick awaiting a long execution before moving to the next task in the same workspace (existing behaviour; revisit in `004` for sub-daily schedules).
