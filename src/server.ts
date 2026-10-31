@@ -1,25 +1,12 @@
-import path from "node:path";
-import { LocalExecutionAdapter } from "./server/execution-adapter.js";
-import { startHttpServer } from "./server/http.js";
-import { logTickError, SchedulerService } from "./server/scheduler.js";
-import { ensureLedgerDataDir, ledgerDataRoot } from "./server/storage.js";
+import { assertSupportedNode } from "./server/node-version.js";
+import { installWarningFilter } from "./server/warnings.js";
 
 async function main(): Promise<void> {
-  await ensureLedgerDataDir();
-  const { RunStore } = await import("./server/run-store.js");
-  const runStore = new RunStore(path.join(ledgerDataRoot(), "runs.db"));
-  const scheduler = new SchedulerService(new LocalExecutionAdapter(), runStore);
-  const server = await startHttpServer(scheduler, runStore);
-  const address = server.address();
-  if (!address || typeof address === "string") {
-    throw new Error("Unable to determine server port");
-  }
-
-  setInterval(() => {
-    scheduler.tickWithoutDispatcher().catch((error: unknown) => logTickError(error));
-  }, 30_000).unref();
-
-  process.stdout.write(`${JSON.stringify({ ready: true, port: address.port })}\n`);
+  assertSupportedNode(process.versions.node);
+  installWarningFilter();
+  const { startPluginServer } = await import("./server/startup.js");
+  const handle = await startPluginServer();
+  process.stdout.write(`${JSON.stringify({ ready: true, port: handle.port })}\n`);
 }
 
 void main().catch((error) => {
