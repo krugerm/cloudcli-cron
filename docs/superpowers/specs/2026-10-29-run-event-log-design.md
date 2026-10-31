@@ -1,6 +1,6 @@
 # Run Event Log — Design
 
-**Date:** 2026-10-29 (revised 2026-10-31 after three review rounds)
+**Date:** 2026-10-29 (revised 2026-10-31 after six review rounds)
 **Branch:** `003-run-event-log`
 **Spec-kit spec:** [`specs/003-run-event-log/spec.md`](../../../specs/003-run-event-log/spec.md)
 **Follow-up:** `004-cron-expressions` builds on this branch.
@@ -219,9 +219,9 @@ export class RunStore {
 1. `assertSupportedNode(process.versions.node)` (§4). Exit 1 on failure.
 2. Install the warning filter (§4).
 3. Dynamically import `./server/run-store.js` and open `RunStore` at `<dataRoot>/runs.db`. On failure, write the path and SQLite message to stderr and exit 1.
-4. `await migrateLedgerRuns(runStore)` (§3).
+4. `const frozenKeys = await migrateLedgerRuns(runStore)` (§3), then `setFrozenWorkspaceKeys(frozenKeys)` (new, `storage.ts`), which `listWorkspaceLedgerRecords` reads.
 5. `runStore.recoverInterruptedRuns(now)`.
-6. Construct `SchedulerService(executionAdapter, runStore)` and `startHttpServer(scheduler, runStore)`.
+6. Construct `SchedulerService(executionAdapter, runStore, frozenKeys)` (`frozenKeys` defaults to an empty set, so tests pass only the store) and `startHttpServer(scheduler, runStore)`.
 7. Start the 30 s tick: `setInterval(() => { scheduler.tickWithoutDispatcher().catch(logTickError) }, 30_000)`.
 
 Every module other than `server.ts` imports `RunStore` with `import type`, so `node:sqlite` is not loaded before steps 1–2.
@@ -234,7 +234,7 @@ Everywhere — runtime and migration — an event's `workspace_key` is `workspac
 
 ### `lastRunStatus` is derived, not stored
 
-- `WorkspaceTask.lastRunStatus` stays in the API type. It is filled when tasks are served: `scheduler.ts` `loadWorkspaceState`, `createTask`/`updateTask`/`pause`/`resume`/`duplicate` responses, and `readGlobalTaskState` call `taskRunSummaries` and set `lastRunStatus = latest?.status ?? task.legacyLastRunStatus ?? null`.
+- `WorkspaceTask.lastRunStatus` stays in the API type. **Every** response that returns a `WorkspaceTask` (workspace state, task create/update/pause/resume/duplicate, `readGlobalTaskState`, `resolveGlobalTask`, global-dashboard actions) fills it on a copy of the task — never on the ledger object inside `fn`, so serving a task never changes the file — as `latest?.status ?? task.legacyLastRunStatus ?? null`, with `latest` from `taskRunSummaries`. `updateTask` ignores any `lastRunStatus` or `legacyLastRunStatus` in the request.
 - New optional stored field `WorkspaceTask.legacyLastRunStatus?: RunStatus | null`. Only the migration sets it (§3), and only for tasks that had a non-null `lastRunStatus` but no imported runs (their runs were pushed out by the old 500-run cap). It is never written afterwards, and is ignored once the task has any run in `runs.db`. New tasks never have it: `createTask` does not set it, and `duplicateTask` (which spreads `...source`, `scheduler.ts:193–201`) deletes it from the copy.
 - `saveWorkspaceLedger` writes `lastRunStatus: null` (v2 files never carry a real value). The task guard (`storage.ts:91`) accepts `lastRunStatus` and `legacyLastRunStatus` missing, `null` or a string.
 - `dashboard.ts` `deriveTaskStatus` uses `TaskRunSummary.latest`. `storedTaskStatus` stays as the no-runs fallback but reads `legacyLastRunStatus` (absent → `never_run`). `lastRunFinishedAt` uses `latestFinished`. `findLatestActionableRunId` uses `latest`.
@@ -253,7 +253,7 @@ Rules:
 
 - **Not re-entrant.** Only public entry points take the lock: `createTask`, `updateTask`, `deleteTask`, `pauseTask`, `resumeTask`, `duplicateTask`, `saveExecutionProfile`, `loadWorkspaceState`, and the scheduler's claim. Code they share (for example `pauseTask` → `updateTask`, `loadWorkspaceState` → `refreshWorkspaceLedger`) is split into a private `…Locked(ledger, …)` variant that takes the already-loaded ledger and never calls `mutateLedger`.
 - **`listRuns` is read-only.** It reads `runs.db` and the ledger file without the lock and never refreshes or saves the ledger.
-- **One locked call per workspace-state request.** `http.ts:82` today calls `refreshWorkspaceLedger` directly (only to read the execution profile) and then `loadWorkspaceState`, which refreshes again. The direct call is removed; the signature becomes `loadWorkspaceState(workspacePath, capabilityFor: (profile: ExecutionProfile | null) => ExecutionCapability)`, and the refresh, capability and response are built inside one `mutateLedger`. `refreshWorkspaceLedger` is no longer public.
+- **One locked call per workspace-state request.** `http.ts:82` today calls `refreshWorkspaceLedger` directly (only to read the execution profile) and then `loadWorkspaceState`, which refreshes again. The direct call is removed; the signature becomes `loadWorkspaceState(workspacePath, capabilityFor: (profile: ExecutionProfile | null) => ExecutionCapability)`, and the refresh, capability and response are built inside one `mutateLedger` (`capabilityFor` is synchronous). `refreshWorkspaceLedger` is no longer public.
 - `fn` must not await the execution adapter or anything that takes the lock. No code holds a ledger object across an `await` of the execution adapter.
 - `RunStore` calls are synchronous and may run inside `fn`.
 
@@ -265,7 +265,7 @@ Rules:
 |---|---|
 | `enabled` changes to `false` (pause) | `null` |
 | `enabled` changes to `true` (resume) | recomputed from now (occurrences during the pause are neither run nor recorded) |
-| `recurrence` present and different from the stored one, compared after `validateRecurrenceDefinition` as canonical JSON (keys sorted recursively, so key order and formatting never count as a change) | recomputed from now (for a paused task this stays `null`: `computeTaskNextRun` returns `null` when `enabled` is false, `recurrence.ts:175`) |
+| `recurrence` present and different from the stored one, compared as canonical JSON (keys sorted recursively) after both the request's and the stored recurrence pass `validateRecurrenceDefinition`, so key order and formatting never count as a change | recomputed from now (for a paused task this stays `null`: `computeTaskNextRun` returns `null` when `enabled` is false, `recurrence.ts:175`) |
 | anything else (name, prompt, unchanged recurrence) | unchanged |
 
 `duplicateTask` creates a new task, so its `nextRunAt` is computed from now, as today.
@@ -309,7 +309,8 @@ Because the claim checks `nextRunAt === scheduledFor` and advances it atomically
 Failure handling:
 
 - The claim throws before saving (reload or `appendEvent` failure): the lock's save does not happen, `nextRunAt` is unchanged, `key` is removed from `inFlightOccurrences`, and the next tick retries.
-- The save at the end of the claim throws after `started` was appended: the run is recorded and not executed. The tick removes `key` from `inFlightOccurrences` and appends `failed` (`summary` and `failure_reason`: "Could not save the schedule; run not started."). On the next tick `nextRunAt` still equals `scheduledFor` and `hasOccurrence(key)` is true, so the `alreadyTracked` branch advances `nextRunAt` without running it twice.
+- The save at the end of the claim throws after `missed` was appended: nothing else to do; on the next tick `nextRunAt` still equals `scheduledFor`, `hasOccurrence(key)` is true, and the `alreadyTracked` branch advances it.
+- The save at the end of the claim throws after `started` was appended (the claim sets a local `startedAppended` flag immediately after that `appendEvent` returns, and the tick checks it): the run is recorded and not executed. The tick removes `key` from `inFlightOccurrences` and appends `failed` (`summary` and `failure_reason`: "Could not save the schedule; run not started."). On the next tick `nextRunAt` still equals `scheduledFor` and `hasOccurrence(key)` is true, so the `alreadyTracked` branch advances `nextRunAt` without running it twice.
 - The final `appendEvent` after execution throws: the run stays `started` until the next startup's recovery closes it.
 
 **Manual runs and retries** (`createManualRun`, `retryRun`) do not claim: they do not move `nextRunAt` and use a fresh `scheduledFor = now`. Their occurrence key is `` `${taskId}:manual:${runId}` `` (today's `occurrenceKeyForTask` format is `${taskId}:${scheduledFor}`), so it can never equal a scheduled occurrence's key. They add that key to `inFlightOccurrences`, append `started` with `source: "manual"` or `"retry"`, execute, and append the final event.
@@ -352,7 +353,7 @@ The complete list of `HttpError(404, "Run not found")` cases:
 - `retryRun` (`scheduler.ts:228`, today a plain `Error` → 400): the run does not exist, or `run.workspaceKey !== workspaceKeyFromPath(workspacePath)`;
 - `GET /v1/runs/:id/events`: the same two conditions.
 
-`HttpError(409, "Run history import pending")` is thrown only by `mutateLedger` for a frozen workspace (§3 Migration). Every other existing `throw new Error(...)` site is unchanged and stays 400; that includes "Task not found" when a manual run or retry targets a deleted task.
+`HttpError(409, "Run history import pending")` is thrown only for a frozen workspace, by the methods listed in §3 Migration. Every other existing `throw new Error(...)` site is unchanged and stays 400; that includes "Task not found" when a manual run or retry targets a deleted task.
 
 ## 3. Migration and client
 
@@ -364,10 +365,10 @@ The complete list of `HttpError(404, "Run not found")` cases:
 2. **Key and target path.** `workspaceKey = workspaceKeyFromPath(file.workspacePath)` (the rule in §2 "Workspace key rule"); `targetPath = <dataRoot>/<workspaceKey>.json`, the path `loadWorkspaceLedger` uses at runtime (`storage.ts:27`). If `workspacePath` is missing or not a string, skip the file and log to stderr. If `targetPath` differs from the file's path and a file already exists at `targetPath`:
    - if the file at `targetPath` has `migratedFrom` equal to this file's name, this file is the leftover of an interrupted step 5: delete it and move on;
    - otherwise log "ledger name conflict: <file> vs <targetPath>" and skip the file (both stay untouched).
-3. **Events.** Timestamps (`scheduledFor`, `startedAt`, `finishedAt`) are normalized with `new Date(x).toISOString()`; a run with an unparsable timestamp counts as invalid (below). Runs are processed in ascending `scheduledFor`, then ascending `startedAt` (missing first), then position in the file, so their `sequence` follows schedule order and a retry sorts after its original. If several entries share an `id`, the first is imported and the rest count as invalid. For every run that passes the existing `isRunEntry` check and whose `id` is not already in the store (`hasRun`), build events with `source='migrated'` and the run's original `id`, `occurrenceKey`, `taskId`, `scheduledFor`, `retryOfRunId`:
+3. **Events.** Timestamps (`scheduledFor`, `startedAt`, `finishedAt`) are normalized with `new Date(x).toISOString()`; a run with an unparsable timestamp counts as invalid (below). Runs are processed in ascending `scheduledFor`, then ascending `startedAt` (missing first), then position in the file, so their `sequence` follows schedule order and a retry sorts after its original. Among entries that pass validation, the first in this processing order with a given `id` is imported; later entries with that `id` count as invalid. An `id` already in the store from **another** file is also counted as invalid and logged ("run id already imported from <other workspace key>"); an `id` already in the store from this file's own earlier, interrupted import is skipped silently (that is the idempotence path). For every run that passes the existing `isRunEntry` check and whose `id` is not already in the store (`hasRun`), build events with `source='migrated'` and the run's original `id`, `occurrenceKey`, `taskId`, `scheduledFor`, `retryOfRunId`:
    - status `succeeded`/`failed`/`missed`: a `started` event at `startedAt` with `executionRequest` and `summary: "Command started."` (today's `createRunningRun` text) if `startedAt` is set; then the final event at `finishedAt` with the run's `outcomeSummary` and `failureReason`. If `finishedAt` is null (never written by v0.2.0 for these statuses), use `startedAt`, then `scheduledFor`.
    - status `running`: `started` at `startedAt ?? scheduledFor`; then `failed` with `source='recovery'`, `at` = migration time, the recovery summary from §1.
-   - status `scheduled` or `canceled`: skipped.
+   - status `scheduled` or `canceled` (never written by v0.2.0): counted as invalid.
    - A run without `startedAt` gets no `started` event, so its `executionRequest` (if any) is kept only in the `.bak`.
    - Entries failing `isRunEntry`, or whose `status` is not one of the six `RunStatus` values: counted and skipped; the count is logged to stderr with the file name. They remain in the `.bak`. (`isRunEntry` accepts any status string, `storage.ts:110`, and an unknown one would fail the `type` CHECK and abort the file's transaction.)
 4. **Commit.** `store.appendEvents(events)` in one transaction.
@@ -384,18 +385,22 @@ The complete list of `HttpError(404, "Run not found")` cases:
 
 Failure in any step for one file: log to stderr, leave the file unchanged, continue with the next file. The next startup retries.
 
-**A workspace whose file still has a `runs` array is frozen until its import succeeds.** Otherwise a later save (refresh, claim, edit) would write the file without `runs` and the v0.2.0 history would be lost, and a later import would give old runs a higher `sequence` than runs recorded in the meantime. Frozen means:
-- `listWorkspaceLedgerRecords` reports it `unavailable` with the warning "Run history import failed; it will be retried at the next start. See the plugin log.";
+**A workspace whose import failed is frozen until a later start imports it.** Otherwise a later save (refresh, claim, edit) would write the ledger without `runs` and the v0.2.0 history would be lost, and any run recorded meanwhile would get a lower `sequence` than the old runs imported later.
+
+`migrateLedgerRuns` returns `frozenKeys: Set<string>`: the derived `workspaceKey` (step 2) of every file whose steps 1–5 failed. Name conflicts (step 2) are not frozen; they are the accepted limit stated there. The set is handed out once at startup (§2 "Wiring and startup", steps 4 and 6) and is fixed for the life of the process. For a key in `frozenKeys`:
+- `listWorkspaceLedgerRecords` reports the workspace `unavailable` with the warning "Run history import failed; it will be retried at the next start. See the plugin log." — for the failed file and for any ledger file at the derived path;
 - the tick skips it;
-- `mutateLedger` throws `HttpError(409, "Run history import pending")` before calling `fn`, so nothing is saved;
+- `mutateLedger`, `createManualRun` and `retryRun` throw `HttpError(409, "Run history import pending")` before reading or writing anything — so neither a misnamed file's target path nor the original can be created or saved, and no run is recorded;
 - `listRuns` and the events endpoint return its already-imported runs (none, until the import commits).
+
+Keying by the derived `workspaceKey` (not by the file) is what freezes a misnamed file's workspace too: runtime loads go to `<derivedKey>.json` (§3 step 2), which the freeze blocks.
 
 Idempotence: a crash between steps 4 and 5 leaves `runs` in the file; the next startup's step 3 skips every imported run and step 5 completes. A file without `runs` is skipped.
 
 ### Ledger code — `src/server/storage.ts`, `src/shared/model.ts`
 
 - `WorkspaceLedger.runs` removed. `STORAGE_VERSION` becomes `2`.
-- `coerceLedgerShape` ignores the contents of `runs`: a missing `runs` is valid and adds no repair note. It reports `importPending: true` when `runs` is an array (see "frozen" above); the array itself is never read outside the migration. The "metadata partially repaired" check becomes `!Array.isArray(record.tasks)`. This keeps migrated workspaces `available` rather than `partial` (`storage.ts:215`).
+- `coerceLedgerShape` ignores `runs`: a missing `runs` is valid and adds no repair note, and a leftover array is never read outside the migration. Whether a workspace is frozen comes only from `frozenKeys` (above). The "metadata partially repaired" check becomes `!Array.isArray(record.tasks)`. This keeps migrated workspaces `available` rather than `partial` (`storage.ts:215`).
 - `createEmptyLedger` drops `runs`.
 - `coerceLedgerShape` copies `migratedFrom` through when it is a string, so later saves keep it (§3 step 5).
 - Task guard: see §2 "`lastRunStatus` is derived, not stored".
@@ -405,10 +410,10 @@ Idempotence: a crash between steps 4 and 5 leaves `runs` in the file; the next s
 - State gains `runsNextCursor: string | null` and `runsTaskFilter: string | null`.
 - **Task filter.** Recent Runs gets a select: "All tasks" plus each task name. Changing it reloads the first page with `taskId`.
 - **Load older runs.** Shown when `runsNextCursor` is set. Calls `GET /v1/runs?workspacePath=<path>&before=<cursor>&limit=100[&taskId=]`, appends results, updates the cursor. Disabled while loading; on error, shows the message inline and stays enabled.
-- **History toggle.** Per run. On first open it calls `GET /v1/runs/:id/events?workspacePath=<path>` and lists events as `<type> · <local time> · <source>`. `migrated` and `recovery` are labelled. When the response's `retryOf` is set, a line "Retry of run scheduled for <retryOf.scheduledFor, local time>" is shown above the events.
+- **History toggle.** Per run. **Every** open calls `GET /v1/runs/:id/events?workspacePath=<path>` (no cache, so a run opened while `running` shows its final event the next time it is opened) and lists events as `<type> · <local time> · <source>`. `migrated` and `recovery` are labelled. When the response's `retryOf` is set, a line "Retry of run scheduled for <retryOf.scheduledFor, local time>" is shown above the events.
 - **Refresh after actions.** Run Now, Retry, `reconcileWorkspaceState` (`app.ts:692`) and the global-dashboard action path (`app.ts:592`, `:667`) refresh the list by **reloading it**: `GET /v1/runs?workspacePath=<path>[&taskId=<filter>]&limit=<n>`, where `n` = the number of runs currently shown, at least 100 and at most 500 (the API maximum). The response replaces the list and the cursor. Run Now and Retry no longer insert their returned run into the list (today's prepend at `app.ts:982`, `:1003` is removed); the reload brings it in. The global-dashboard path reloads only when the action's workspace is the loaded one, as today (`app.ts:590`). There is no client-side merge: because runs are in creation order (§1), a reload of the top `n` runs is always a consistent prefix of the history, and "Load older" continues from its cursor.
 - **List generation.** State gains `runsGeneration: number`. Workspace switch, first load, filter change and every reload increment it **when the request is sent**, and record the new value with the request. "Load older" does not increment it; it records the current value. A response is applied only if its recorded generation still equals `runsGeneration`; a Load older response additionally requires that its `before` still equals the current `runsNextCursor` (a reload sent before it may have moved the cursor). Otherwise it is dropped. So a Load older response is dropped once any reload, filter change or workspace switch has been sent after it, and only the most recently sent reload can replace the list (no older state can overwrite a newer one).
-- **`loadFromContext`** (workspace switch, `app.ts:542`, first load, and the refresh paths above) loads tasks and status as today; its `runs` handling is the reload above, and a workspace switch also resets `runsTaskFilter` to `null`. Task and status data in a workspace-state response are applied as today regardless of the generation check, which covers only the run list.
+- **`loadFromContext`** (workspace switch, `app.ts:542`, first load, and the refresh paths above) loads tasks and status from the workspace-state response as today, but **ignores its `runs` and `runsNextCursor`**. The run list always comes from a separate, generation-tagged `GET /v1/runs?workspacePath=<path>&limit=<n>[&taskId=<filter>]` (first load and workspace switch: `n` = 100). A workspace switch also resets `runsTaskFilter` to `null`. Task and status data are applied as today regardless of the generation check, which covers only the run list.
 - The client uses `ListRunsResponse` from `contracts.ts` (`RunPage` is server-internal).
 
 ## 4. Testing and rollout
@@ -440,7 +445,8 @@ Idempotence: a crash between steps 4 and 5 leaves `runs` in the file; the next s
 - invalid entries skipped and counted;
 - filename stem different from `workspaceKeyFromPath(workspacePath)` → the ledger is moved to `<derivedKey>.json` with `migratedFrom` and the derived `workspaceKey`, the original is removed, events use the derived key, and the workspace loads as `available`;
 - a file without `runs` is untouched; a second run is a no-op;
-- an import that fails (e.g. `appendEvents` throws) leaves the file with `runs`, the workspace frozen (`unavailable`, skipped by the tick, edits → 409), and the next start imports it;
+- an import that fails (e.g. `appendEvents` throws) leaves the file with `runs` and its derived key in `frozenKeys`: `unavailable`, skipped by the tick, edits, Run Now and Retry → 409; for a misnamed file, opening its workspace creates no `<derivedKey>.json`; the next start imports it;
+- a run `id` present in two workspaces' files: imported for the first, counted invalid and logged for the second;
 - duplicate run `id`s in one file: first imported, rest counted invalid;
 - an unknown run `status` is skipped and counted, and the rest of the file imports;
 - a task whose runs were all pushed out by the old cap gets `legacyLastRunStatus`; a task with imported runs does not;
@@ -476,7 +482,7 @@ These files read or seed `runs` and change as follows:
 | `tests/integration/scheduler-loop.test.ts` | Rewritten: assertions on `ledger.runs` (lines 112–303) become `runStore.listRuns` / `getRun`. "Records all missed recurring occurrences in one tick" keeps its meaning. |
 | `tests/integration/global-dashboard.test.ts` | Seed runs through `appendEvent`; pass the store to `buildGlobalDashboardSnapshot`; `startHttpServer(new SchedulerService())` at lines 887 and 999 gains the store. |
 | `tests/integration/performance.test.ts` | `new SchedulerService(...)` (line 77) gains the store; `state.runs` length (line 86) changes from 500 to 100; `buildGlobalDashboardSnapshot` (line 127) gains the store; any `runs:` seeding goes through `appendEvent`. |
-| `tests/integration/app-reconcile.test.ts` | Reconcile now merges pages; add cases where an older page survives an action, a global-dashboard action, and Run Now under a task filter. |
+| `tests/integration/app-reconcile.test.ts` | Reconcile reloads the top `n` runs (100–500) instead of replacing with the state response's runs; add cases: 3 loaded pages are still shown after an action, after a global-dashboard action, and after Run Now under a task filter. |
 | `tests/unit/dashboard.test.ts` | Replace `runs:` seed objects with `TaskRunSummary` inputs; status derivation from `latest`; `legacyLastRunStatus` fallback; `never_run` when neither. |
 | `tests/unit/storage.test.ts` | Replace `runs:` seed objects; a ledger without `runs` is `available`; no `runs` written; missing `lastRunStatus` / `legacyLastRunStatus` accepted. |
 | `tests/integration/run-history.test.ts` | Add Load older runs, task filter and History toggle cases; a refresh after 3 loaded pages reloads 300 runs; a Load older response arriving after a reload, filter change or workspace switch is dropped, including one sent while a reload was in flight that moved the cursor; of two overlapping reloads only the later-sent one is applied. |
