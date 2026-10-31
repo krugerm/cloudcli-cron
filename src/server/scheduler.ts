@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type {
   CreateTaskRequest,
   ExecutionProfileRequest,
+  RunEventsResponse,
   UpdateTaskRequest,
   WorkspaceStateResponse
 } from "../shared/contracts.js";
@@ -192,6 +193,24 @@ export class SchedulerService {
   async listRuns(workspacePath: string, options: ListRunsOptions = {}): Promise<RunPage> {
     const ledger = await loadWorkspaceLedger(workspacePath);
     return this.runStore.listRuns(workspaceKeyFromPath(ledger.workspacePath), options);
+  }
+
+  /** Read-only: 404 for a missing run or one from another workspace. */
+  async listRunEvents(runId: string, workspacePath: string): Promise<RunEventsResponse> {
+    const ledger = await loadWorkspaceLedger(workspacePath);
+    const workspaceKey = workspaceKeyFromPath(ledger.workspacePath);
+    const run = this.runStore.getRun(runId);
+    if (!run || run.workspaceKey !== workspaceKey) {
+      throw new HttpError(404, "Run not found");
+    }
+    const original = run.retryOfRunId ? this.runStore.getRun(run.retryOfRunId) : null;
+    return {
+      events: this.runStore.listEvents(runId),
+      retryOf:
+        original && original.workspaceKey === workspaceKey
+          ? { id: original.id, scheduledFor: original.scheduledFor }
+          : null
+    };
   }
 
   async createTask(request: CreateTaskRequest): Promise<WorkspaceTask> {

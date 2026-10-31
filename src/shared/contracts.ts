@@ -4,6 +4,7 @@ import type {
   GlobalDashboardFilter,
   GlobalDashboardSnapshot,
   RecurrenceDefinition,
+  RunEvent,
   ScheduledRun,
   WorkspaceTask
 } from "./model.js";
@@ -225,5 +226,40 @@ export function parseGlobalDashboardRetryRequest(body: unknown): GlobalDashboard
 
   return {
     runId: readRequiredString(body, "runId")
+  };
+}
+
+export interface RunEventsResponse {
+  events: RunEvent[];
+  retryOf: { id: string; scheduledFor: string } | null;
+}
+
+export interface ListRunsQuery {
+  workspacePath: string;
+  limit?: number;
+  before?: string;
+  taskId?: string;
+}
+
+export function parseListRunsQuery(searchParams: URLSearchParams): ListRunsQuery {
+  const workspacePath = searchParams.get("workspacePath")?.trim();
+  if (!workspacePath) {
+    throw new Error("workspacePath is required");
+  }
+  const limitValue = searchParams.get("limit");
+  let limit: number | undefined;
+  if (limitValue !== null) {
+    if (!/^-?\d+$/u.test(limitValue.trim())) {
+      throw new Error("limit must be an integer");
+    }
+    limit = Number(limitValue);
+  }
+  const before = searchParams.get("before");
+  const taskId = searchParams.get("taskId");
+  return {
+    workspacePath,
+    limit,
+    before: before === null ? undefined : before,
+    taskId: taskId ? taskId : undefined
   };
 }

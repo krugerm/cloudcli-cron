@@ -6,6 +6,7 @@ import type {
   GlobalDashboardRetryRequest,
   ExecutionProfileResponse,
   ListRunsResponse,
+  RunEventsResponse,
   RunResponse,
   TaskResponse,
   WorkspaceStateResponse
@@ -15,6 +16,7 @@ import {
   parseExecutionProfileRequest,
   parseGlobalDashboardQuery,
   parseGlobalDashboardRetryRequest,
+  parseListRunsQuery,
   parseUpdateTaskRequest,
   parseWorkspaceScopedRequest
 } from "../shared/contracts.js";
@@ -100,14 +102,23 @@ export function createHttpHandler(scheduler: SchedulerService, runStore: RunStor
       }
 
       if (request.method === "GET" && url.pathname === "/v1/runs") {
+        const query = parseListRunsQuery(url.searchParams);
+        const page = await scheduler.listRuns(query.workspacePath, {
+          limit: query.limit,
+          before: query.before ?? null,
+          taskId: query.taskId ?? null
+        });
+        json(response, 200, { runs: page.runs, nextCursor: page.nextCursor } satisfies ListRunsResponse);
+        return;
+      }
+
+      if (request.method === "GET" && segments[0] === "v1" && segments[1] === "runs" && segments[2] && segments[3] === "events" && segments.length === 4) {
         const workspacePath = url.searchParams.get("workspacePath");
         if (!workspacePath) {
           throw new Error("workspacePath is required");
         }
-        const limitValue = url.searchParams.get("limit");
-        const limit = limitValue ? Number(limitValue) : undefined;
-        const page = await scheduler.listRuns(workspacePath, { limit });
-        json(response, 200, { runs: page.runs, nextCursor: page.nextCursor } satisfies ListRunsResponse);
+        const payload: RunEventsResponse = await scheduler.listRunEvents(decodeURIComponent(segments[2]), workspacePath);
+        json(response, 200, payload);
         return;
       }
 

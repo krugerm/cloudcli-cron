@@ -6,6 +6,7 @@ import {
   type GlobalDashboardResponse,
   parseGlobalDashboardQuery,
   parseGlobalDashboardRetryRequest,
+  parseListRunsQuery,
   parseUpdateTaskRequest,
   parseWorkspaceScopedRequest
 } from "../../src/shared/contracts.js";
@@ -13,6 +14,23 @@ import { normalizeExecutionProfile } from "../../src/server/settings.js";
 import { PluginRpcClient } from "../../src/client/api.js";
 
 describe("plugin RPC contracts", () => {
+  it("parses run list queries", () => {
+    expect(parseListRunsQuery(new URLSearchParams("workspacePath=/tmp/p&limit=20&before=41&taskId=t1"))).toEqual({
+      workspacePath: "/tmp/p",
+      limit: 20,
+      before: "41",
+      taskId: "t1"
+    });
+    expect(parseListRunsQuery(new URLSearchParams("workspacePath=/tmp/p"))).toEqual({
+      workspacePath: "/tmp/p",
+      limit: undefined,
+      before: undefined,
+      taskId: undefined
+    });
+    expect(() => parseListRunsQuery(new URLSearchParams("workspacePath=/tmp/p&limit=abc"))).toThrow("limit must be an integer");
+    expect(() => parseListRunsQuery(new URLSearchParams("limit=5"))).toThrow("workspacePath is required");
+  });
+
   it("parses workspace-scoped payloads", () => {
     expect(parseWorkspaceScopedRequest({ workspacePath: "/tmp/project" })).toEqual({
       workspacePath: "/tmp/project"
