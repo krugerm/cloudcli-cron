@@ -174,6 +174,7 @@ function coerceLedgerShape(raw: unknown, fallbackWorkspaceKey: string): { ledger
       })),
       runs: runs.map((run) => ({
         ...run,
+        sequence: 0,
         workspaceKey
       })),
       executionProfile,

@@ -86,6 +86,7 @@ export interface ScheduledRun {
   taskId: string;
   workspaceKey: string;
   scheduledFor: string;
+  sequence: number;
   startedAt: string | null;
   finishedAt: string | null;
   status: RunStatus;
@@ -179,3 +180,28 @@ export interface CrossWorkspaceActionTarget {
 }
 
 export const RUN_HISTORY_LIMIT = 500;
+
+export type RunEventType = "started" | "succeeded" | "failed" | "missed";
+export type RunEventSource = "scheduler" | "manual" | "retry" | "recovery" | "migrated";
+
+export interface NewRunEvent {
+  runId: string;
+  workspaceKey: string;
+  taskId: string;
+  occurrenceKey: string;
+  scheduledFor: string;
+  type: RunEventType;
+  at: string;
+  source: RunEventSource;
+  summary: string;
+  failureReason?: string | null;
+  retryOfRunId?: string | null;
+  executionRequest?: Record<string, unknown> | null;
+}
+
+export interface RunEvent extends NewRunEvent {
+  seq: number;
+}
+
+export const RUN_PAGE_SIZE = 100;
+export const RUN_PAGE_MAX = 500;
