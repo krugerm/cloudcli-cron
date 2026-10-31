@@ -26,6 +26,10 @@
 - Q: How is a scheduled occurrence prevented from running twice when ticks overlap? → A: Each occurrence is claimed under the per-workspace lock only if the freshly loaded task is enabled and its next run time still equals that occurrence.
 - Q: What status does an upgraded task show if the old cap removed all its runs? → A: Its last stored status, kept as a legacy value until it runs again.
 
+### Session 2026-10-31 (third design review)
+
+- Q: Can loading a workspace page cause a due run to be skipped? → A: No. Refreshing a workspace never moves a next-run time that is already due; the scheduler runs it or records it as missed.
+
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 - Keep every run (Priority: P1)
@@ -93,7 +97,7 @@ A user upgrading from v0.2.0 keeps all runs previously stored in the workspace J
 - An error while processing one workspace during a scheduler tick: other workspaces are still processed and the plugin server keeps running.
 - A retry request names a run from a different workspace: it is rejected as "Run not found".
 - A v0.2.0 task whose runs were all pushed out by the old cap: it keeps its last known status instead of showing "never run".
-- A workspace file whose name does not match its workspace path: it is renamed during import; if another file already has that name, both are left untouched and the conflict is logged.
+- A workspace file whose name does not match its workspace path: it is moved to the expected name during import; if an unrelated file already has that name, both are left untouched and the conflict is logged.
 - A run with an unknown status in a v0.2.0 file: it is skipped and counted; the rest of the file imports.
 - `runs.db` cannot be opened or is from a newer plugin version: the plugin server stops at startup with the file path and reason.
 - Node older than 22.13, or 23.0–23.3: the plugin server stops at startup with "Scheduled Prompt needs Node 22.13+ (found X)".
@@ -120,7 +124,7 @@ A user upgrading from v0.2.0 keeps all runs previously stored in the workspace J
 - **FR-014**: Changes to a task made while one of its runs executes MUST NOT be overwritten when the run finishes.
 - **FR-015**: A failure while processing one workspace in a scheduler tick MUST NOT stop other workspaces or terminate the plugin server.
 - **FR-016**: Run lookups for retry and history MUST be limited to the requesting workspace, and a run from another workspace MUST be reported as not found (HTTP 404).
-- **FR-017**: Each scheduled occurrence MUST execute at most once, even when scheduler ticks overlap, and MUST NOT execute after the user has rescheduled, paused or deleted its task.
+- **FR-017**: Each scheduled occurrence MUST execute at most once, even when scheduler ticks overlap, and MUST NOT execute after the user has rescheduled, paused or deleted its task. Viewing a workspace MUST NOT cause a due occurrence to be skipped: it still runs or is recorded as missed.
 - **FR-018**: A task whose v0.2.0 runs were all removed by the old 500-run cap MUST keep showing its last known status after upgrade, until it runs again.
 
 ### Key Entities *(include if feature involves data)*
@@ -142,6 +146,7 @@ A user upgrading from v0.2.0 keeps all runs previously stored in the workspace J
 
 ## Assumptions
 
+- Rolling back to v0.2.0 requires restoring the `.v1.json.bak` files; runs recorded after the upgrade stay only in `runs.db`.
 - The plugin server runs on the `node` found on the PATH, as started by CloudCLI, and users of CloudCLI run Node 22 (CloudCLI targets Node 22).
 - Several KB of storage per run (captured output and the prompt) is acceptable; an every-minute task grows `runs.db` by roughly 2–3 GB per year. Retention is a likely follow-up feature.
 - Statuses `scheduled` and `canceled` are never produced today and need no event type.
