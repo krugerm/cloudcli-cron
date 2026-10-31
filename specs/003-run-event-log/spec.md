@@ -87,7 +87,7 @@ A user upgrading from v0.2.0 keeps all runs previously stored in the workspace J
 
 **Acceptance Scenarios**:
 
-1. **Given** v0.2.0 workspace files with runs, **When** the new version starts, **Then** every valid run appears in Recent Runs with the same status, times and summary, and each original file is kept as `<original name>.v1.json.bak`.
+1. **Given** v0.2.0 workspace files with runs, **When** the new version starts, **Then** every valid run appears in Recent Runs with the same status, times and summary, and each original file is kept as `<original file stem>.v1.json.bak`.
 2. **Given** the import was interrupted, **When** the server starts again, **Then** the import completes with no duplicated runs.
 
 ### Edge Cases
@@ -102,7 +102,9 @@ A user upgrading from v0.2.0 keeps all runs previously stored in the workspace J
 - `runs.db` cannot be opened or is from a newer plugin version: the plugin server stops at startup with the file path and reason.
 - Node older than 22.13, or 23.0–23.3: the plugin server stops at startup with "Scheduled Prompt needs Node 22.13+ (found X)".
 - Runs are recorded out of schedule order (catch-up after downtime, delayed runs): runs are listed newest-recorded first, so paging neither skips nor repeats them.
-- A task's prompt or name is edited while an occurrence is due: the occurrence still runs.
+- A task's prompt or name is edited while an occurrence is due: the occurrence is not dropped; it runs, or is recorded as missed if the scheduler reaches it outside the grace window.
+- Importing a workspace's v0.2.0 runs fails: that workspace is shown as unavailable and is neither scheduled nor editable until the import succeeds at a later start; no history is lost.
+- Two v0.2.0 files map to the same workspace: the second is not imported, and the conflict is logged for manual resolution (accepted limit).
 - A workspace or task is deleted: its events remain in `runs.db`.
 
 ## Requirements *(mandatory)*
@@ -118,10 +120,10 @@ A user upgrading from v0.2.0 keeps all runs previously stored in the workspace J
 - **FR-007**: On startup, the system MUST close every run left in progress with a `failed` event marked as recovery.
 - **FR-008**: On startup, the system MUST import runs from v0.2.0 workspace files into `runs.db`, keep a backup of each file, and remove `runs` from the workspace file. The import MUST be safe to repeat.
 - **FR-009**: Task definitions MUST remain in the per-workspace JSON files.
-- **FR-010**: The workspace view MUST offer a task filter, "Load older runs" when more runs exist, and a per-run History view; refreshing after an action MUST NOT discard older pages already loaded.
+- **FR-010**: The workspace view MUST offer a task filter, "Load older runs" when more runs exist, and a per-run History view; refreshing after an action MUST keep showing as many runs as were loaded (up to 500), and MUST NOT skip or repeat runs when older pages are loaded afterwards.
 - **FR-011**: The plugin server MUST refuse to start on Node versions where `node:sqlite` needs a flag (below 22.13, and 23.0–23.3) with an explicit message.
 - **FR-012**: User-facing behavior MUST preserve loading, empty, success, error, and recovery states consistent with existing CloudCLI conventions.
-- **FR-013**: A task's last run status MUST be derived from the run history, not stored separately, so it can never disagree with the runs.
+- **FR-013**: A task's last run status MUST be derived from the run history whenever the task has runs in it, so the two can never disagree; a stored value is used only for upgraded tasks with no runs (FR-018).
 - **FR-014**: Changes to a task made while one of its runs executes MUST NOT be overwritten when the run finishes.
 - **FR-015**: A failure while processing one workspace in a scheduler tick MUST NOT stop other workspaces or terminate the plugin server.
 - **FR-016**: Run lookups for retry and history MUST be limited to the requesting workspace, and a run from another workspace MUST be reported as not found (HTTP 404).
@@ -141,7 +143,7 @@ A user upgrading from v0.2.0 keeps all runs previously stored in the workspace J
 - **SC-001**: With 500,000 recorded events, the first page of a workspace's runs loads in under 50 ms.
 - **SC-002**: With 500,000 recorded events across 20 tasks, the global dashboard's per-task run summaries complete in under 50 ms.
 - **SC-003**: Recording one event takes under 5 ms.
-- **SC-004**: 100% of valid v0.2.0 runs are present after upgrade, with identical status, start and finish times, and summaries (runs that were still `running` are closed as failed by recovery).
+- **SC-004**: 100% of valid v0.2.0 runs are present after upgrade, with identical status, start and finish instants (stored in normalized ISO 8601 form), and summaries (runs that were still `running` are closed as failed by recovery).
 - **SC-005**: After a restart, 0 runs remain in the "running" state from before the restart.
 - **SC-006**: Finishing a run never rewrites the workspace JSON file; starting a scheduled run rewrites it only to advance the next run time.
 
