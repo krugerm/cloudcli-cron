@@ -636,7 +636,7 @@ export class WorkspaceScheduledPromptsApp {
   /** Every list request records the generation it was sent under; stale responses are dropped. */
   private async reloadRuns(workspacePath: string, limit: number): Promise<void> {
     const generation = this.state.snapshot.runsGeneration + 1;
-    this.state.patch({ runsGeneration: generation });
+    this.state.patch({ runsGeneration: generation, runsLoadingOlder: false });
     const taskId = this.state.snapshot.runsTaskFilter;
     try {
       const page = await this.rpc.listRuns(workspacePath, { limit, taskId });
@@ -675,7 +675,10 @@ export class WorkspaceScheduledPromptsApp {
         this.state.patch({ runsError: error instanceof Error ? error.message : "Failed to load older runs." });
       }
     } finally {
-      this.state.patch({ runsLoadingOlder: false });
+      const current = this.state.snapshot;
+      if (current.runsGeneration === generation && current.workspacePath === workspacePath) {
+        this.state.patch({ runsLoadingOlder: false });
+      }
     }
   }
 

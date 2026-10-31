@@ -164,14 +164,127 @@ describe("app run list", () => {
   });
 
   it("does not prepend the Run Now result; the reload brings it in", async () => {
-    const { app, state, container } = createHarness({ "POST /v1/tasks/t1/actions/run-now": async () => ({ run: makeRun(424242) }) });
+    let gateReloads = false;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let reached!: () => void;
+    const reloadReached = new Promise<void>((resolve) => { reached = resolve; });
+    const { app, state, container } = createHarness({
+      "POST /v1/tasks/t1/actions/run-now": async () => ({ run: makeRun(424242) }),
+      "GET /v1/runs?": async (path) => {
+        const limit = Number(new URLSearchParams(path.split("?")[1]).get("limit") ?? "100");
+        if (gateReloads) {
+          reached();
+          await gate;
+        }
+        return page(1000, limit);
+      }
+    });
     await app.mount();
     const before = state().runs.length;
     (app as any).state.patch({ tasks: [{ id: "t1", workspaceKey: "ws", workspacePath: "/tmp/project", name: "T", prompt: "P", recurrence: { scheduleType: "daily", timezone: "Europe/Paris", localTime: "09:00" }, recurrenceSummary: "Daily", enabled: true, nextRunAt: null, lastRunStatus: null, createdAt: "x", updatedAt: "x" }] });
+    gateReloads = true;
     Array.from(container.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent === "Run Now")?.click();
+    await reloadReached;
     await flush();
     expect(state().runs.some((run: { id: string }) => run.id === "r424242")).toBe(false);
     expect(state().runs).toHaveLength(before);
+    release();
+    await vi.waitFor(() => expect(state().successMessage).toBe("Manual run finished."));
+    expect(state().runs.some((run: { id: string }) => run.id === "r424242")).toBe(false);
+    expect(state().runs).toHaveLength(100);
+    app.unmount();
+  });
+
+  it("drops a Load older response whose cursor a reload landing first has moved", async () => {
+    let releaseReload!: () => void;
+    let releaseOlder!: () => void;
+    const reloadGate = new Promise<void>((resolve) => { releaseReload = resolve; });
+    const olderGate = new Promise<void>((resolve) => { releaseOlder = resolve; });
+    let reloadCalls = 0;
+    const { app, state } = createHarness({
+      "GET /v1/runs?workspacePath=%2Ftmp%2Fproject&limit=100&before=": async () => {
+        await olderGate;
+        return page(900, 100);
+      },
+      "GET /v1/runs?workspacePath=%2Ftmp%2Fproject&limit=": async () => {
+        reloadCalls += 1;
+        if (reloadCalls === 2) {
+          await reloadGate;
+          return { runs: page(1000, 100).runs, nextCursor: "500" };
+        }
+        return page(1000, 100);
+      }
+    });
+    await app.mount();
+    const reload = (app as any).reloadRuns("/tmp/project", 100);
+    await flush();
+    const older = (app as any).loadOlderRuns();
+    await flush();
+    releaseReload();
+    await reload;
+    expect(state().runsNextCursor).toBe("500");
+    releaseOlder();
+    await older;
+    await flush();
+    expect(state().runs).toHaveLength(100);
+    expect(state().runsNextCursor).toBe("500");
+    app.unmount();
+  });
+
+  it("drops a Load older response that was in flight across a workspace switch", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const { app, state } = createHarness({
+      "GET /v1/runs?workspacePath=%2Ftmp%2Fproject&limit=100&before=": async () => {
+        await gate;
+        return page(900, 100);
+      }
+    });
+    await app.mount();
+    const older = (app as any).loadOlderRuns();
+    await flush();
+    await app.loadFromContext("/tmp/other");
+    expect(state().runs).toHaveLength(100);
+    release();
+    await older;
+    await flush();
+    expect(state().workspacePath).toBe("/tmp/other");
+    expect(state().runs).toHaveLength(100);
+    expect(state().runsNextCursor).toBe("901");
+    app.unmount();
+  });
+
+  it("keeps Load older disabled for the new workspace when a stale request from the old one settles", async () => {
+    let releaseOld!: () => void;
+    let releaseNew!: () => void;
+    const oldGate = new Promise<void>((resolve) => { releaseOld = resolve; });
+    const newGate = new Promise<void>((resolve) => { releaseNew = resolve; });
+    const { app, state } = createHarness({
+      "GET /v1/runs?workspacePath=%2Ftmp%2Fproject&limit=100&before=": async () => {
+        await oldGate;
+        return page(900, 100);
+      },
+      "GET /v1/runs?workspacePath=%2Ftmp%2Fother&limit=100&before=": async () => {
+        await newGate;
+        return page(900, 100);
+      }
+    });
+    await app.mount();
+    const oldOlder = (app as any).loadOlderRuns();
+    await flush();
+    await app.loadFromContext("/tmp/other");
+    const newOlder = (app as any).loadOlderRuns();
+    await flush();
+    expect(state().runsLoadingOlder).toBe(true);
+    releaseOld();
+    await oldOlder;
+    await flush();
+    expect(state().runsLoadingOlder).toBe(true);
+    releaseNew();
+    await newOlder;
+    expect(state().runsLoadingOlder).toBe(false);
+    expect(state().runs).toHaveLength(200);
     app.unmount();
   });
 
