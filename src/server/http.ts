@@ -19,6 +19,7 @@ import {
 } from "../shared/contracts.js";
 import type { ExecutionCapability, ExecutionProfile } from "../shared/model.js";
 import { buildGlobalDashboardSnapshot, readGlobalTaskState, resolveGlobalTask } from "./dashboard.js";
+import { HttpError } from "./http-error.js";
 import { resolveExecutionCapability } from "./settings.js";
 import { SchedulerService } from "./scheduler.js";
 
@@ -224,7 +225,7 @@ export function createHttpHandler(scheduler: SchedulerService): http.RequestList
       json(response, 404, { error: "Route not found" });
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown error";
-      json(response, 400, { error: message });
+      json(response, error instanceof HttpError ? error.status : 400, { error: message });
     }
   };
 }
