@@ -23,7 +23,11 @@ The format is based on Keep a Changelog, and this project uses semantic version 
 ### Changed
 
 - Requires Node.js 22.13+ (or 23.4+).
-- `GET /v1/runs` without `limit` now returns 100 runs (was 500); page with `before`.
+- `GET /v1/runs` without `limit` now returns 100 runs (was up to 500); page with `before`. An empty `limit=` counts as absent.
+- Workspace-state `runs` is now the first 100 runs, with `runsNextCursor` to page further.
+- Retrying an unknown or foreign run now answers 404 (was 400).
+- Workspaces whose run history import is pending or failed answer 409 "Run history import pending".
+- `ScheduledRun` gains a `sequence` field.
 
 ## [0.1.0] - 2026-04-26
 

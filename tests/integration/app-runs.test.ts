@@ -117,6 +117,19 @@ describe("app run list", () => {
     app.unmount();
   });
 
+  it("resets a task filter whose task no longer exists on refresh and reloads unfiltered", async () => {
+    const { app, state, calls } = createHarness();
+    await app.mount();
+    await (app as any).setRunsTaskFilter("gone");
+    calls.length = 0;
+    await app.loadFromContext("/tmp/project", "refresh");
+    expect(state().runsTaskFilter).toBeNull();
+    const listCalls = calls.filter((call) => call.path.startsWith("/v1/runs?"));
+    expect(listCalls).toHaveLength(1);
+    expect(listCalls[0].path).not.toContain("taskId=");
+    app.unmount();
+  });
+
   it("applies only the later-sent of two overlapping reloads", async () => {
     let releaseFirst!: () => void;
     let calls = 0;
@@ -306,11 +319,12 @@ describe("app run list", () => {
   });
 
   it("keeps the task filter and loaded pages after Run Now under a task filter", async () => {
+    const task = { id: "t1", workspaceKey: "ws", workspacePath: "/tmp/project", name: "T", prompt: "P", recurrence: { scheduleType: "daily", timezone: "Europe/Paris", localTime: "09:00" }, recurrenceSummary: "Daily", enabled: true, nextRunAt: null, lastRunStatus: null, createdAt: "x", updatedAt: "x" };
     const { app, state, calls, container } = createHarness({
-      "POST /v1/tasks/t1/actions/run-now": async () => ({ run: makeRun(5000) })
+      "POST /v1/tasks/t1/actions/run-now": async () => ({ run: makeRun(5000) }),
+      "GET /v1/workspace-state": async () => ({ capability: { status: "needs_config", message: "Configure." }, executionProfile: null, tasks: [task], runs: [], runsNextCursor: null })
     });
     await app.mount();
-    (app as any).state.patch({ tasks: [{ id: "t1", workspaceKey: "ws", workspacePath: "/tmp/project", name: "T", prompt: "P", recurrence: { scheduleType: "daily", timezone: "Europe/Paris", localTime: "09:00" }, recurrenceSummary: "Daily", enabled: true, nextRunAt: null, lastRunStatus: null, createdAt: "x", updatedAt: "x" }] });
     await (app as any).setRunsTaskFilter("t1");
     await (app as any).loadOlderRuns();
     await (app as any).loadOlderRuns();

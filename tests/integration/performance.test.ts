@@ -3,7 +3,8 @@ import path from "node:path";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { performance } from "node:perf_hooks";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import type { ScheduledRun, WorkspaceTask } from "../../src/shared/model.js";
+import type { WorkspaceTask } from "../../src/shared/model.js";
+import type { LegacyRun } from "../../src/server/legacy-runs.js";
 import { buildGlobalDashboardSnapshot } from "../../src/server/dashboard.js";
 import { RunStore } from "../../src/server/run-store.js";
 import { SchedulerService } from "../../src/server/scheduler.js";
@@ -52,7 +53,7 @@ describe("performance fixtures", () => {
       updatedAt: createdAt
     }));
 
-    const runs: ScheduledRun[] = Array.from({ length: 500 }, (_, index) => ({
+    const runs: LegacyRun[] = Array.from({ length: 500 }, (_, index) => ({
       id: `run-${index}`,
       occurrenceKey: `task-${index % tasks.length}:2026-04-${String((index % 28) + 1).padStart(2, "0")}T08:00:00.000Z`,
       taskId: `task-${index % tasks.length}`,

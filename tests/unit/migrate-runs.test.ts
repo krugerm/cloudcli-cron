@@ -4,6 +4,7 @@ import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { migrateLedgerRuns } from "../../src/server/migrate-runs.js";
+import { eventsForLegacyRun } from "../../src/server/legacy-runs.js";
 import { RunStore } from "../../src/server/run-store.js";
 import { listWorkspaceLedgerRecords } from "../../src/server/storage.js";
 import { RECOVERY_SUMMARY } from "../../src/server/run-fold.js";
@@ -195,8 +196,21 @@ describe("migrateLedgerRuns", () => {
     const key = workspaceKeyFromPath(workspacePath);
     await writeV1("orig.json", workspacePath, [v1Run("r1")]);
     await writeFile(path.join(dataDir, `${key}.json`), JSON.stringify({ version: 2, workspaceKey: key, workspacePath, tasks: [], migratedFrom: "orig.json", executionProfile: null, updatedAt: NOW }), "utf8");
+    store.appendEvents(eventsForLegacyRun(v1Run("r1") as never, key, NOW)!);
     await migrateLedgerRuns(store, { log, now: NOW });
     expect(existsSync(path.join(dataDir, "orig.json"))).toBe(false);
+  });
+
+  it("keeps the original and logs a conflict when it holds a run id the store lacks (partial rollback)", async () => {
+    const workspacePath = "/tmp/partial";
+    const key = workspaceKeyFromPath(workspacePath);
+    await writeV1("orig.json", workspacePath, [v1Run("r1"), v1Run("r2")]);
+    await writeFile(path.join(dataDir, `${key}.json`), JSON.stringify({ version: 2, workspaceKey: key, workspacePath, tasks: [], migratedFrom: "orig.json", executionProfile: null, updatedAt: NOW }), "utf8");
+    store.appendEvents(eventsForLegacyRun(v1Run("r1") as never, key, NOW)!);
+    const frozen = await migrateLedgerRuns(store, { log, now: NOW });
+    expect(existsSync(path.join(dataDir, "orig.json"))).toBe(true);
+    expect(logs.some((line) => line.includes("ledger name conflict: orig.json"))).toBe(true);
+    expect(frozen.size).toBe(0);
   });
 
   it("leaves both files untouched on a name conflict, even when the target has runs: []", async () => {

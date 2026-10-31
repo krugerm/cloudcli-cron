@@ -28,6 +28,8 @@ describe("plugin RPC contracts", () => {
       taskId: undefined
     });
     expect(() => parseListRunsQuery(new URLSearchParams("workspacePath=/tmp/p&limit=abc"))).toThrow("limit must be an integer");
+    expect(parseListRunsQuery(new URLSearchParams("workspacePath=/tmp/p&limit=")).limit).toBeUndefined();
+    expect(parseListRunsQuery(new URLSearchParams("workspacePath=/tmp/p&limit=%20")).limit).toBeUndefined();
     expect(() => parseListRunsQuery(new URLSearchParams("limit=5"))).toThrow("workspacePath is required");
   });
 
@@ -259,6 +261,7 @@ describe("plugin RPC contracts", () => {
         taskId: "task-1",
         workspaceKey: "workspace-1",
         scheduledFor: "2026-04-27T08:00:00.000Z",
+        sequence: 1,
         startedAt: "2026-04-27T08:00:01.000Z",
         finishedAt: "2026-04-27T08:00:10.000Z",
         status: "succeeded",

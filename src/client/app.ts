@@ -1,5 +1,5 @@
 import type { CreateTaskRequest, GlobalDashboardActionResponse, UpdateTaskRequest } from "../shared/contracts.js";
-import type { GlobalDashboardFilter, GlobalJobRunStatus, WorkspaceTask } from "../shared/model.js";
+import { RUN_PAGE_MAX, RUN_PAGE_SIZE, type GlobalDashboardFilter, type GlobalJobRunStatus, type WorkspaceTask } from "../shared/model.js";
 import type { PluginAPI } from "../types.js";
 import { PluginRpcClient } from "./api.js";
 import { AppStateStore, DEFAULT_CAPABILITY } from "./state.js";
@@ -630,7 +630,7 @@ export class WorkspaceScheduledPromptsApp {
   }
 
   private refreshLimit(): number {
-    return Math.min(500, Math.max(100, this.state.snapshot.runs.length));
+    return Math.min(RUN_PAGE_MAX, Math.max(RUN_PAGE_SIZE, this.state.snapshot.runs.length));
   }
 
   /** Every list request records the generation it was sent under; stale responses are dropped. */
@@ -660,7 +660,7 @@ export class WorkspaceScheduledPromptsApp {
     }
     this.state.patch({ runsLoadingOlder: true });
     try {
-      const page = await this.rpc.listRuns(workspacePath, { before, limit: 100, taskId });
+      const page = await this.rpc.listRuns(workspacePath, { before, limit: RUN_PAGE_SIZE, taskId });
       const current = this.state.snapshot;
       if (
         current.runsGeneration !== generation ||
@@ -688,7 +688,7 @@ export class WorkspaceScheduledPromptsApp {
       return;
     }
     this.state.patch({ runsTaskFilter: taskId, runs: [], runsNextCursor: null });
-    await this.reloadRuns(workspacePath, 100);
+    await this.reloadRuns(workspacePath, RUN_PAGE_SIZE);
   }
 
   async loadFromContext(workspacePath: string | null, mode: "switch" | "refresh" = "switch"): Promise<boolean> {
@@ -748,7 +748,11 @@ export class WorkspaceScheduledPromptsApp {
         successMessage: null,
         highlightedTaskId: null
       });
-      await this.reloadRuns(workspacePath, mode === "switch" ? 100 : this.refreshLimit());
+      const filter = this.state.snapshot.runsTaskFilter;
+      if (filter !== null && !payload.tasks.some((task) => task.id === filter)) {
+        this.state.patch({ runsTaskFilter: null });
+      }
+      await this.reloadRuns(workspacePath, mode === "switch" ? RUN_PAGE_SIZE : this.refreshLimit());
       return true;
     } catch (error) {
       this.state.patch({

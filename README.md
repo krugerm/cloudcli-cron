@@ -243,7 +243,7 @@ The plugin now auto-normalizes the legacy Codex preset on reload.
 
 ### A Workspace Shows "Run history import failed"
 
-The workspace's v0.2.0 run history could not be imported into `runs.db` (see the plugin log). The workspace is read-only and not scheduled until the import succeeds; it is retried on every plugin start. No history is lost: the original ledger and its `.v1.json.bak` are kept.
+The workspace's v0.2.0 run history could not be imported into `runs.db` (see the plugin log). The workspace is shown as unavailable (an error; workspace-state answers 409) and is not scheduled until the import succeeds; it is retried on every plugin start. No history is lost: the original ledger file is kept unchanged, and a `.v1.json.bak` exists only if the backup step succeeded.
 
 ## Known Limits
 

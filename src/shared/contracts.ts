@@ -248,7 +248,7 @@ export function parseListRunsQuery(searchParams: URLSearchParams): ListRunsQuery
   }
   const limitValue = searchParams.get("limit");
   let limit: number | undefined;
-  if (limitValue !== null) {
+  if (limitValue !== null && limitValue.trim() !== "") {
     if (!/^-?\d+$/u.test(limitValue.trim())) {
       throw new Error("limit must be an integer");
     }

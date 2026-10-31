@@ -70,7 +70,7 @@ export async function migrateLedgerRuns(store: RunStore, options: MigrationOptio
 
       if (targetPath !== filePath && (await exists(targetPath))) {
         const target = await readJson(targetPath).catch(() => null);
-        if (isObject(target) && target.migratedFrom === name) {
+        if (isObject(target) && target.migratedFrom === name && originalFullyImported(store, raw.runs, derivedKey, now)) {
           await unlink(filePath);
           log(`[scheduled-prompts] ${name}: removed leftover of an interrupted import into ${derivedKey}.json`);
           continue;
@@ -89,6 +89,17 @@ export async function migrateLedgerRuns(store: RunStore, options: MigrationOptio
     }
   }
   return frozen;
+}
+
+/** True when every valid run id in the original ledger is already in the store. */
+function originalFullyImported(store: RunStore, entries: unknown[], workspaceKey: string, now: string): boolean {
+  return entries.every(
+    (entry) =>
+      !isLegacyRunEntry(entry) ||
+      !isRunStatus(entry.status) ||
+      !eventsForLegacyRun(entry, workspaceKey, now) ||
+      store.hasRun(entry.id)
+  );
 }
 
 function collectEvents(
