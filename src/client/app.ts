@@ -3,6 +3,7 @@ import { RUN_PAGE_MAX, RUN_PAGE_SIZE, type GlobalDashboardFilter, type GlobalJob
 import type { PluginAPI } from "../types.js";
 import { PluginRpcClient } from "./api.js";
 import { AppStateStore, DEFAULT_CAPABILITY } from "./state.js";
+import { escapeHtml } from "./escape.js";
 import { renderExecutionBanner } from "./views/execution-banner.js";
 import { renderGlobalDashboard } from "./views/global-dashboard.js";
 import { renderRunHistory } from "./views/run-history.js";
@@ -437,7 +438,7 @@ function normalizeGlobalRunStatus(
 function renderBanner(kind: "error" | "success" | "info", title: string, message: string): HTMLElement {
   const banner = document.createElement("div");
   banner.className = `wsp-banner wsp-banner-${kind}`;
-  banner.innerHTML = `<strong>${title}</strong><span>${message}</span>`;
+  banner.innerHTML = `<strong>${escapeHtml(title)}</strong><span>${escapeHtml(message)}</span>`;
   return banner;
 }
 

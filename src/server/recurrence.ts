@@ -201,8 +201,9 @@ export function cronStaleWindow(
     } else {
       // The 61-minute walk started inside a DST gap window; prev() can skip the shifted run,
       // so step forward from it (stepping from an occurrence returns the shifted run).
-      const forward = parseCron(recurrence, cronIso(parseCron(recurrence, staleBeforeIso).prev()));
-      let last = cronIso(parseCron(recurrence, staleBeforeIso).prev());
+      const prevIso = cronIso(parseCron(recurrence, staleBeforeIso).prev());
+      const forward = parseCron(recurrence, prevIso);
+      let last = prevIso;
       for (;;) {
         const candidate = cronIso(forward.next());
         if (candidate >= staleBeforeIso) {

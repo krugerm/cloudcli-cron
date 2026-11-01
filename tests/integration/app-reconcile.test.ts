@@ -69,4 +69,17 @@ describe("app reconciliation", () => {
 
     app.unmount();
   }, 10_000);
+
+  it("renders banner text literally instead of as HTML", async () => {
+    const container = document.createElement("div");
+    const app = new WorkspaceScheduledPromptsApp(container, createApi());
+    await app.mount();
+
+    (app as any).state.patch({ busy: false, error: null, successMessage: "Created <b>x</b>" });
+
+    expect(container.textContent).toContain("Created <b>x</b>");
+    expect(container.querySelector(".wsp-banner b")).toBeNull();
+
+    app.unmount();
+  });
 });

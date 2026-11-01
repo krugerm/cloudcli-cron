@@ -182,7 +182,7 @@ Supported argument templates:
 
 - Automatic runs are attempted only for occurrences that are still within the scheduler grace window (90 seconds).
 - If the plugin or host was unavailable long enough for an occurrence to become stale, that occurrence is recorded as `missed`.
-- Recurring schedules record each missed slot in history, then continue from the next future occurrence without catch-up replay.
+- Recurring schedules other than cron record each missed slot in history, then continue from the next future occurrence without catch-up replay.
 - Each occurrence runs at most once, even if a run is still in progress when the next scheduler tick fires.
 - Editing a task's name or prompt never skips a due run; changing its schedule or resuming it recomputes the next run from now.
 - A run that was in progress when the plugin stopped is marked `failed` ("Plugin server restarted while this run was in progress.") at the next start.
