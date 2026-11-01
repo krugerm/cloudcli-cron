@@ -1,5 +1,7 @@
+import { DateTime } from "luxon";
 import type { CreateTaskRequest } from "../../shared/contracts.js";
 import type {
+  CronRecurrenceDefinition,
   DailyRecurrenceDefinition,
   MonthlyRecurrenceDefinition,
   OneTimeRecurrenceDefinition,
@@ -10,7 +12,17 @@ import type {
   WeeklyRecurrenceDefinition,
   WorkspaceTask
 } from "../../shared/model.js";
-import { formatRecurrenceSummary, nextOccurrenceForRecurrence, validateRecurrenceDefinition } from "../../server/recurrence.js";
+import {
+  cronFrequencyWarning,
+  cronUpcomingRuns,
+  formatRecurrenceSummary,
+  nextOccurrenceForRecurrence,
+  normalizeRecurrence,
+  validateRecurrenceDefinition
+} from "../../server/recurrence.js";
+import { escapeHtml } from "../escape.js";
+
+const DEFAULT_CRON_EXPRESSION = "0 9 * * MON-FRI";
 
 export interface TaskFormHandlers {
   onSubmit(request: Omit<CreateTaskRequest, "workspacePath">): void;
@@ -45,6 +57,7 @@ function recurrenceFields(task: WorkspaceTask | null): string {
   const weekdays = recurrence?.scheduleType === "weekdays" ? recurrence.weekdays : ["monday", "tuesday", "wednesday", "thursday", "friday"];
   const dayOfWeek = recurrence?.scheduleType === "weekly" ? recurrence.dayOfWeek : "monday";
   const dayOfMonth = recurrence?.scheduleType === "monthly" ? recurrence.dayOfMonth : 1;
+  const cronExpression = recurrence?.scheduleType === "cron" ? recurrence.expression : DEFAULT_CRON_EXPRESSION;
 
   return `
     <div class="wsp-field">
@@ -55,22 +68,23 @@ function recurrenceFields(task: WorkspaceTask | null): string {
         <option value="weekdays"${scheduleType === "weekdays" ? " selected" : ""}>Selected weekdays</option>
         <option value="weekly"${scheduleType === "weekly" ? " selected" : ""}>Weekly</option>
         <option value="monthly"${scheduleType === "monthly" ? " selected" : ""}>Monthly</option>
+        <option value="cron"${scheduleType === "cron" ? " selected" : ""}>Cron expression</option>
       </select>
       <p>Choose when this prompt should run in the current workspace.</p>
     </div>
     <div class="wsp-field">
       <label for="wsp-timezone">Timezone</label>
-      <input id="wsp-timezone" name="timezone" value="${timezone}" placeholder="Europe/Paris">
+      <input id="wsp-timezone" name="timezone" value="${escapeHtml(timezone)}" placeholder="Europe/Paris">
       <p>IANA timezone used to compute the next run.</p>
     </div>
     <div class="wsp-field" data-schedule-scope="timed">
       <label for="wsp-local-time">Local Time</label>
-      <input id="wsp-local-time" name="localTime" value="${localTime}" placeholder="09:00" inputmode="numeric">
+      <input id="wsp-local-time" name="localTime" value="${escapeHtml(localTime)}" placeholder="09:00" inputmode="numeric">
       <p>24-hour local time for recurring schedules.</p>
     </div>
     <div class="wsp-field" data-schedule-scope="one_time">
       <label for="wsp-run-at">Run At</label>
-      <input id="wsp-run-at" name="runAt" value="${runAt}" placeholder="2026-04-26T09:00:00.000Z">
+      <input id="wsp-run-at" name="runAt" value="${escapeHtml(runAt)}" placeholder="2026-04-26T09:00:00.000Z">
       <p>Absolute ISO timestamp for a single execution.</p>
     </div>
     <div class="wsp-field wsp-field-span-2" data-schedule-scope="weekdays">
@@ -98,6 +112,11 @@ function recurrenceFields(task: WorkspaceTask | null): string {
       <label for="wsp-day-of-month">Day Of Month</label>
       <input id="wsp-day-of-month" name="dayOfMonth" value="${dayOfMonth}" type="number" min="1" max="31">
       <p>If the day does not exist in a month, it clamps to the last day.</p>
+    </div>
+    <div class="wsp-field wsp-field-span-2" data-schedule-scope="cron">
+      <label for="wsp-cron-expression">Cron Expression</label>
+      <input id="wsp-cron-expression" name="cronExpression" value="${escapeHtml(cronExpression)}" placeholder="*/15 9-17 * * MON-FRI" spellcheck="false" style="font-family: ui-monospace, monospace">
+      <p>minute hour day-of-month month day-of-week · supports * , - / L # ? and @daily-style nicknames · W and H not supported</p>
     </div>
   `;
 }
@@ -140,6 +159,12 @@ function buildRecurrence(formData: FormData): RecurrenceDefinition {
         dayOfMonth: Number(formData.get("dayOfMonth") ?? 1),
         monthlyOverflowPolicy: "clamp_to_last_day"
       } satisfies MonthlyRecurrenceDefinition;
+    case "cron":
+      return normalizeRecurrence({
+        scheduleType,
+        timezone,
+        expression: String(formData.get("cronExpression") ?? "")
+      } satisfies CronRecurrenceDefinition);
     default:
       throw new Error("Unsupported schedule type");
   }
@@ -148,6 +173,34 @@ function buildRecurrence(formData: FormData): RecurrenceDefinition {
 function summarizeDraft(recurrence: RecurrenceDefinition): string {
   const nextRunAt = nextOccurrenceForRecurrence(recurrence);
   return `${formatRecurrenceSummary(recurrence)}${nextRunAt ? ` | Next run: ${nextRunAt}` : " | Next run: unavailable"}`;
+}
+
+type CronPreview = { ok: true; summary: string; runs: string[]; warning: string | null } | { ok: false; message: string };
+
+function formatPreviewRun(iso: string, timezone: string): string {
+  return DateTime.fromISO(iso, { zone: "utc" }).setZone(timezone).setLocale("en").toFormat("ccc d LLL HH:mm");
+}
+
+function buildCronPreview(recurrence: CronRecurrenceDefinition): CronPreview {
+  try {
+    validateRecurrenceDefinition(recurrence);
+  } catch (error) {
+    return { ok: false, message: error instanceof Error ? error.message : "Invalid schedule." };
+  }
+  const now = new Date().toISOString();
+  return {
+    ok: true,
+    summary: formatRecurrenceSummary(recurrence),
+    runs: cronUpcomingRuns(recurrence, now, 5).map((iso) => formatPreviewRun(iso, recurrence.timezone)),
+    warning: cronFrequencyWarning(recurrence, now)
+  };
+}
+
+function previewLine(testId: string, text: string): HTMLElement {
+  const line = document.createElement("div");
+  line.dataset.testid = testId;
+  line.textContent = text;
+  return line;
 }
 
 export function renderTaskForm(task: WorkspaceTask | null, handlers: TaskFormHandlers): HTMLElement {
@@ -163,12 +216,12 @@ export function renderTaskForm(task: WorkspaceTask | null, handlers: TaskFormHan
         <div class="wsp-panel-title">Prompt</div>
         <div class="wsp-field">
           <label for="wsp-name">Name</label>
-          <input id="wsp-name" name="name" value="${task?.name ?? ""}" required placeholder="Morning summary">
+          <input id="wsp-name" name="name" value="${escapeHtml(task?.name ?? "")}" required placeholder="Morning summary">
           <p>Short label shown in the schedule list.</p>
         </div>
         <div class="wsp-field">
           <label for="wsp-prompt">Prompt</label>
-          <textarea id="wsp-prompt" name="prompt" rows="6" required placeholder="Summarize the workspace and highlight blockers.">${task?.prompt ?? ""}</textarea>
+          <textarea id="wsp-prompt" name="prompt" rows="6" required placeholder="Summarize the workspace and highlight blockers.">${escapeHtml(task?.prompt ?? "")}</textarea>
           <p>The exact prompt sent when the job runs.</p>
         </div>
       </div>
@@ -215,11 +268,21 @@ export function renderTaskForm(task: WorkspaceTask | null, handlers: TaskFormHan
       });
     };
 
-    toggle("timed", scheduleType !== "one_time");
+    toggle("timed", scheduleType !== "one_time" && scheduleType !== "cron");
+    toggle("cron", scheduleType === "cron");
     toggle("one_time", scheduleType === "one_time");
     toggle("weekdays", scheduleType === "weekdays");
     toggle("weekly", scheduleType === "weekly");
     toggle("monthly", scheduleType === "monthly");
+  };
+
+  let cronCache: { key: string; preview: CronPreview } | null = null;
+  const cronPreviewFor = (recurrence: CronRecurrenceDefinition): CronPreview => {
+    const key = `${recurrence.expression}|${recurrence.timezone}|${new Date().toISOString().slice(0, 16)}`;
+    if (cronCache?.key !== key) {
+      cronCache = { key, preview: buildCronPreview(recurrence) };
+    }
+    return cronCache.preview;
   };
 
   const refreshPreview = (): RecurrenceDefinition | null => {
@@ -236,6 +299,20 @@ export function renderTaskForm(task: WorkspaceTask | null, handlers: TaskFormHan
 
     try {
       const recurrence = buildRecurrence(formData);
+      if (recurrence.scheduleType === "cron") {
+        const cronPreview = cronPreviewFor(recurrence);
+        if (!cronPreview.ok) {
+          preview.textContent = "Preview unavailable.";
+          feedback.textContent = cronPreview.message;
+          return null;
+        }
+        preview.replaceChildren(
+          previewLine("task-form-summary", cronPreview.summary),
+          ...cronPreview.runs.map((run) => previewLine("task-form-run", run)),
+          ...(cronPreview.warning ? [previewLine("task-form-warning", cronPreview.warning)] : [])
+        );
+        return recurrence;
+      }
       validateRecurrenceDefinition(recurrence);
       preview.textContent = summarizeDraft(recurrence);
       return recurrence;

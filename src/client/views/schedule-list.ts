@@ -1,4 +1,5 @@
 import type { WorkspaceTask } from "../../shared/model.js";
+import { escapeHtml } from "../escape.js";
 
 export interface ScheduleListHandlers {
   onEdit(taskId: string): void;
@@ -44,8 +45,8 @@ export function renderScheduleList(
     item.innerHTML = `
       <div class="wsp-task-head">
         <div>
-          <strong>${task.name}</strong>
-          <p>${task.recurrenceSummary}</p>
+          <strong>${escapeHtml(task.name)}</strong>
+          <p>${escapeHtml(task.recurrenceSummary)}</p>
         </div>
         <span class="wsp-status-chip">${task.enabled ? "Enabled" : "Paused"}</span>
       </div>

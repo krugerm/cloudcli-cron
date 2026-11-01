@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest";
 import {
   CRON_COLLAPSE_CAP,
   computeTaskNextRun,
+  cronFrequencyWarning,
   cronNextDue,
   cronStaleWindow,
+  cronUpcomingRuns,
   formatRecurrenceSummary,
   nextOccurrenceForRecurrence,
   normalizeRecurrence,
@@ -275,5 +277,24 @@ describe("cron", () => {
       expect(cronStaleWindow(nightly, "2026-03-29T01:30:00.000Z", "2026-03-29T12:00:00.000Z", CRON_COLLAPSE_CAP).count).toBe(1);
       expect(cronNextDue(nightly, "2026-03-29T01:15:00.000Z").nextDue).toBe("2026-03-29T01:30:00.000Z");
     });
+  });
+
+  it.each([
+    ["* * * * *", "2026-11-02T10:00:00.000Z", "Runs as often as every 1 min, 1,440 times in 24 hours. Each run sends the prompt to Claude."],
+    ["* 9 * * *", "2026-11-02T10:00:00.000Z", "Runs as often as every 1 min, 60 times in 24 hours. Each run sends the prompt to Claude."],
+    ["* 9 * * MON-FRI", "2026-11-06T10:00:00.000Z", "Runs as often as every 1 min, 60 times in 24 hours. Each run sends the prompt to Claude."],
+    ["0,2 9 * * *", "2026-11-02T09:01:00.000Z", "Runs as often as every 2 min, 2 times in 24 hours. Each run sends the prompt to Claude."],
+    ["*/2 * * * *", "2026-11-02T10:00:00.000Z", "Runs as often as every 2 min, 720 times in 24 hours. Each run sends the prompt to Claude."],
+    ["*/10 * * * *", "2026-11-02T10:00:00.000Z", null]
+  ])("frequency warning for %s at %s", (expression, now, expected) => {
+    expect(cronFrequencyWarning(cron(expression, "UTC"), now)).toBe(expected);
+  });
+
+  it("lists upcoming runs", () => {
+    expect(cronUpcomingRuns(cron("0 9 * * MON-FRI"), "2026-11-02T08:00:00.000Z", 3)).toEqual([
+      "2026-11-03T08:00:00.000Z",
+      "2026-11-04T08:00:00.000Z",
+      "2026-11-05T08:00:00.000Z"
+    ]);
   });
 });

@@ -83,6 +83,35 @@ function parseCron(recurrence: CronRecurrenceDefinition, currentDate: string) {
   });
 }
 
+export function cronUpcomingRuns(recurrence: CronRecurrenceDefinition, fromIso: string, count: number): string[] {
+  const iterator = parseCron(recurrence, fromIso);
+  return Array.from({ length: count }, () => cronIso(iterator.next()));
+}
+
+const WARNING_GAP_MS = 5 * 60_000;
+const DAY_MS = 24 * 60 * 60_000;
+
+/** Design §2: smallest gap over the next 25 runs; count in the 24 h from the first upcoming run. */
+export function cronFrequencyWarning(recurrence: CronRecurrenceDefinition, nowIso: string): string | null {
+  const upcoming = cronUpcomingRuns(recurrence, nowIso, 25).map((iso) => Date.parse(iso));
+  let smallestGap = Number.POSITIVE_INFINITY;
+  for (let index = 1; index < upcoming.length; index += 1) {
+    smallestGap = Math.min(smallestGap, upcoming[index]! - upcoming[index - 1]!);
+  }
+  if (smallestGap >= WARNING_GAP_MS) {
+    return null;
+  }
+  const windowStart = upcoming[0]!;
+  const windowEnd = windowStart + DAY_MS;
+  const counter = parseCron(recurrence, new Date(windowStart - 1).toISOString());
+  let runs = 0;
+  while (runs < CRON_COLLAPSE_CAP && Date.parse(cronIso(counter.next())) < windowEnd) {
+    runs += 1;
+  }
+  const minutes = Math.max(1, Math.floor(smallestGap / 60_000));
+  return `Runs as often as every ${minutes} min, ${runs.toLocaleString("en-US")} times in 24 hours. Each run sends the prompt to Claude.`;
+}
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
