@@ -14,6 +14,7 @@ CloudCLI / ClaudeCodeUI plugin to create workspace-scoped scheduled prompts and 
   - selected weekdays
   - weekly
   - monthly
+  - cron expressions (`*/15 9-17 * * MON-FRI`), with a live summary, next runs and a frequency warning
 - Persist schedules and run history per workspace
 - Configure a local execution command per workspace
 - Run a schedule immediately with `Run Now`
@@ -122,6 +123,22 @@ When a save succeeds:
 - the plugin shows a success banner
 - the updated schedule is highlighted in the list
 
+### Cron Expressions
+
+Choose **Cron expression** as the schedule type and enter 5 fields: `minute hour day-of-month month day-of-week`, evaluated in the task's time zone.
+
+- Supported: `*` `,` `-` `/`, month and weekday names, `?`, `L` (last day of the month), `5L` (last Friday), `FRI#3` (third Friday), and `@yearly` `@annually` `@monthly` `@weekly` `@daily` `@hourly` in any case.
+- Not supported (rejected with a message): `W` (nearest weekday), `H` (random values), seconds (6 fields), `@midnight`, `@reboot`, and expressions that never match a date such as `0 9 31 2 *`.
+- When day-of-month and day-of-week are both set, a run happens when either matches (as in crontab).
+- The preview shows the plain-English meaning and the next 5 runs; schedules that run less than 5 minutes apart get a warning.
+
+```text
+*/15 9-17 * * MON-FRI   every 15 minutes, 09:00–17:59, Monday to Friday
+0 9 L * *               09:00 on the last day of each month
+0 9 * * FRI#3           09:00 on the third Friday
+@daily                  every day at 00:00
+```
+
 ### 4. Run Or Recover
 
 From the schedule list:
@@ -169,6 +186,8 @@ Supported argument templates:
 - Each occurrence runs at most once, even if a run is still in progress when the next scheduler tick fires.
 - Editing a task's name or prompt never skips a due run; changing its schedule or resuming it recomputes the next run from now.
 - A run that was in progress when the plugin stopped is marked `failed` ("Plugin server restarted while this run was in progress.") at the next start.
+- After downtime, a cron task records one `missed` entry summarising how many runs were missed and between which times, then continues with the next due run.
+- A cron task never starts a scheduled run while another run of the same task is still executing; the skipped occurrence is not recorded.
 
 ## Storage
 
@@ -247,7 +266,6 @@ The workspace's v0.2.0 run history could not be imported into `runs.db` (see the
 
 ## Known Limits
 
-- No cron syntax
 - Run history is never pruned
 - No external notification channel
 - No built-in command validation button yet

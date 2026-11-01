@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project uses semantic version tags for GitHub releases.
 
+## [0.4.0] - 2026-11-01
+
+### Added
+
+- "Cron expression" schedule type: standard 5-field syntax with `L`, `#`, `?` and `@daily`-style nicknames, a live plain-English summary, the next 5 runs and a warning for schedules less than 5 minutes apart.
+- Specific messages for unsupported cron syntax (`W`, `H`, seconds, other nicknames) and for expressions that never match a date.
+- After downtime, missed runs of a cron task are recorded as one summarised entry.
+- A cron task skips a scheduled run while another run of the same task is still executing.
+
+### Fixed
+
+- Quotes and angle brackets in task names and form values no longer break the form or the schedule list.
+
 ## [0.3.0] - 2026-10-31
 
 ### Added
