@@ -23,7 +23,7 @@
 ### Session 2026-11-01 (spec review)
 
 - Q: How are nickname case and extra spaces handled? → A: Normalised on the server for every create and update, so stored text is the same from the form and the API.
-- Q: How is the frequency warning computed? → A: From the smallest gap among the next 25 runs and the count of runs in the next 24 hours, so it does not depend on the time of day.
+- Q: How is the frequency warning computed? → A: From the smallest gap among the next 25 runs and the count of runs in the 24 hours starting at the first upcoming run, so it does not depend on the day or time.
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -56,7 +56,7 @@ A user types an expression the plugin cannot run and is told precisely why, befo
 
 1. **Given** `0 9 15W * *`, **When** the user types it, **Then** the form says `W (nearest weekday) is not supported.` and Save is blocked.
 2. **Given** a 6-field expression, **When** the user types it, **Then** the form says seconds are not supported and shows the 5-field format.
-3. **Given** `* * * * *`, **When** the user types it, **Then** the form warns that it runs as often as every minute, 1,440+ times in the next 24 hours, and still allows saving.
+3. **Given** `* * * * *`, **When** the user types it, **Then** the form warns that it runs as often as every minute, 1,440+ times in 24 hours, and still allows saving.
 4. **Given** `H 9 * * *` or `0 9 31 4,6,9,11 *`, **When** the user types it, **Then** the form says `H (random values) is not supported.` or `This cron expression never matches a date.` and Save is blocked.
 
 ---
@@ -95,11 +95,11 @@ A user with an every-minute schedule does not get hundreds of history records af
 - **FR-002**: The system MUST accept standard 5-field expressions with `*`, `,`, `-`, `/`, month and weekday names, `?`, `L`, `nL`, `#`, and the nicknames `@yearly`, `@annually`, `@monthly`, `@weekly`, `@daily`, `@hourly` in any letter case, and MUST store the expression normalised (outer spaces removed, inner spaces collapsed, nicknames lower-cased) whichever way it was entered.
 - **FR-003**: The system MUST reject `W`, `H`, 6-field expressions, other field counts, other nicknames, expressions that never match a date, and any expression the parser rejects, each with a specific message, and MUST NOT save a task with a rejected expression.
 - **FR-004**: The form MUST show, for a valid expression, a plain-English summary and the next 5 run times in the task's time zone, updated as the user types.
-- **FR-005**: The form MUST warn, without blocking, when any two consecutive upcoming runs are less than 5 minutes apart, stating the smallest gap and how many runs fall in the next 24 hours; the warning MUST NOT depend on the time of day the expression is typed.
+- **FR-005**: The form MUST warn, without blocking, when any two consecutive upcoming runs are less than 5 minutes apart, stating the smallest gap and how many runs fall in 24 hours starting at the first upcoming run; the warning MUST NOT depend on the day or time the expression is typed.
 - **FR-006**: Cron schedules MUST be computed in the task's time zone, including daylight-saving changes.
 - **FR-007**: The five existing schedule types and their saved data MUST keep working unchanged.
 - **FR-008**: Consecutive occurrences of a cron task that could not run within the grace window (scheduler not running, or execution profile not ready) MUST be recorded as one missed-run record that states how many were missed and between which times, and a retried scheduler pass MUST NOT record it twice.
-- **FR-009**: A scheduled occurrence MUST NOT start while any run of the same task (scheduled or manual) is still executing; it MUST be skipped without a history record, and the schedule MUST continue afterwards. Manual runs MUST NOT be blocked by this.
+- **FR-009**: A scheduled occurrence of a cron task MUST NOT start while any run of the same task (scheduled or manual) is still executing; it MUST be skipped without a history record, and the schedule MUST continue afterwards. Manual runs MUST NOT be blocked by this. The five existing schedule types are not affected (FR-007).
 - **FR-010**: Values typed into the form, and task names and summaries in the schedule list, MUST be displayed correctly even when they contain HTML-special characters.
 - **FR-011**: User-facing behavior MUST preserve loading, empty, success, error, and recovery states consistent with existing CloudCLI conventions.
 
@@ -114,7 +114,7 @@ A user with an every-minute schedule does not get hundreds of history records af
 - **SC-001**: A user can create a working every-15-minutes weekday schedule in under 1 minute, without leaving the form.
 - **SC-002**: 100% of the rejected forms listed in FR-003 show their specific message, and none can be saved.
 - **SC-003**: After 8 hours of downtime, an every-minute task adds exactly 1 missed-run record, not 479.
-- **SC-004**: No task ever has two scheduled runs executing at the same time.
+- **SC-004**: No cron task ever has a scheduled run start while another run of the same task is executing.
 - **SC-005**: Existing schedules of the five other types run at the same times before and after the upgrade.
 
 ## Assumptions
