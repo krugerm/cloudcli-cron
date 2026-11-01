@@ -59,6 +59,29 @@ describe("scheduler service integration", () => {
     expect(state.tasks[0]?.name).toBe("Morning summary");
   });
 
+  it("lists a task whose saved cron never matches, with no next run, instead of failing the load", async () => {
+    const ledger = await loadWorkspaceLedger(workspacePath);
+    const now = new Date().toISOString();
+    ledger.tasks.push({
+      id: "task-bad-cron",
+      workspaceKey: ledger.workspaceKey,
+      workspacePath: ledger.workspacePath,
+      name: "Bad cron",
+      prompt: "Go",
+      recurrence: { scheduleType: "cron", timezone: "Europe/Paris", expression: "0 9 31 2 *" },
+      recurrenceSummary: "Cron",
+      enabled: true,
+      nextRunAt: null,
+      lastRunStatus: null,
+      createdAt: now,
+      updatedAt: now
+    });
+    await saveWorkspaceLedger(ledger);
+    const state = await createScheduler().loadWorkspaceState(workspacePath, () => ({ status: "ready", message: "ok" }));
+    expect(state.tasks).toHaveLength(1);
+    expect(state.tasks[0]?.nextRunAt).toBeNull();
+  });
+
   it("updates a task and recalculates its recurrence summary", async () => {
     const scheduler = createScheduler();
     const task = await scheduler.createTask({

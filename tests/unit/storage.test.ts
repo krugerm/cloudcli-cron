@@ -19,6 +19,41 @@ describe("storage", () => {
     await rm(tempHome, { recursive: true, force: true });
   });
 
+  async function writeLedgerWithTask(recurrence: Record<string, unknown>) {
+    const ledger = await loadWorkspaceLedger("/tmp/project");
+    const now = new Date().toISOString();
+    const task = {
+      id: "task-cron",
+      workspaceKey: ledger.workspaceKey,
+      workspacePath: ledger.workspacePath,
+      name: "Cron",
+      prompt: "Go",
+      recurrence,
+      recurrenceSummary: "Cron",
+      enabled: true,
+      nextRunAt: null,
+      lastRunStatus: null,
+      createdAt: now,
+      updatedAt: now
+    };
+    const dataDir = path.join(tempHome, ".cloudcli-workspace-scheduled-prompts");
+    await mkdir(dataDir, { recursive: true });
+    await writeFile(path.join(dataDir, `${ledger.workspaceKey}.json`), JSON.stringify({ ...ledger, tasks: [task] }), "utf8");
+    return (await listWorkspaceLedgerRecords()).find((entry) => entry.workspaceKey === ledger.workspaceKey);
+  }
+
+  it("loads a cron task", async () => {
+    const record = await writeLedgerWithTask({ scheduleType: "cron", timezone: "Europe/Paris", expression: "*/15 9-17 * * MON-FRI" });
+    expect(record?.warning).toBeNull();
+    expect(record?.ledger?.tasks).toHaveLength(1);
+  });
+
+  it("drops a cron task that never matches a date, with the existing warning", async () => {
+    const record = await writeLedgerWithTask({ scheduleType: "cron", timezone: "Europe/Paris", expression: "0 9 31 4,6,9,11 *" });
+    expect(record?.ledger?.tasks).toHaveLength(0);
+    expect(record?.warning).toContain("Invalid task entries were ignored.");
+  });
+
   it("creates an empty ledger when no file exists", async () => {
     const ledger = await loadWorkspaceLedger("/tmp/project");
     expect(ledger.tasks).toEqual([]);

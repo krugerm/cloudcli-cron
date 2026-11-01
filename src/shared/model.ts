@@ -1,4 +1,4 @@
-export type ScheduleType = "one_time" | "daily" | "weekdays" | "weekly" | "monthly";
+export type ScheduleType = "one_time" | "daily" | "weekdays" | "weekly" | "monthly" | "cron";
 export const RUN_STATUSES = ["scheduled", "running", "succeeded", "failed", "missed", "canceled"] as const;
 export type RunStatus = (typeof RUN_STATUSES)[number];
 export type ExecutionCapabilityStatus = "ready" | "needs_config" | "invalid" | "unsupported";
@@ -50,12 +50,18 @@ export interface MonthlyRecurrenceDefinition extends BaseRecurrenceDefinition {
   monthlyOverflowPolicy?: MonthlyOverflowPolicy;
 }
 
+export interface CronRecurrenceDefinition extends BaseRecurrenceDefinition {
+  scheduleType: "cron";
+  expression: string;
+}
+
 export type RecurrenceDefinition =
   | OneTimeRecurrenceDefinition
   | DailyRecurrenceDefinition
   | WeekdaysRecurrenceDefinition
   | WeeklyRecurrenceDefinition
-  | MonthlyRecurrenceDefinition;
+  | MonthlyRecurrenceDefinition
+  | CronRecurrenceDefinition;
 
 export type WeekdayName =
   | "monday"

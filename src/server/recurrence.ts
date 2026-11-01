@@ -1,5 +1,8 @@
+import { CronExpressionParser } from "cron-parser";
+import cronstrue from "cronstrue";
 import { DateTime } from "luxon";
 import type {
+  CronRecurrenceDefinition,
   MonthlyRecurrenceDefinition,
   RecurrenceDefinition,
   WeekdayName,
@@ -46,6 +49,129 @@ function resolveMonthlyDay(definition: MonthlyRecurrenceDefinition, year: number
   return Math.min(definition.dayOfMonth, maxDay);
 }
 
+export const CRON_COLLAPSE_CAP = 1440;
+
+const CRON_NICKNAMES = new Set(["@yearly", "@annually", "@monthly", "@weekly", "@daily", "@hourly"]);
+const CRON_FIELDS_HELP = "minute hour day-of-month month day-of-week";
+const NEVER_MATCHES = "This cron expression never matches a date.";
+
+function normalizeCronExpression(expression: string): string {
+  const collapsed = expression.trim().replace(/\s+/g, " ");
+  return collapsed.startsWith("@") ? collapsed.toLowerCase() : collapsed;
+}
+
+/** The only normaliser (design §1); other types and non-string expressions are returned unchanged. */
+export function normalizeRecurrence(recurrence: RecurrenceDefinition): RecurrenceDefinition {
+  if (recurrence.scheduleType !== "cron" || typeof recurrence.expression !== "string") {
+    return recurrence;
+  }
+  return { ...recurrence, expression: normalizeCronExpression(recurrence.expression) };
+}
+
+function cronIso(date: { toISOString(): string | null }): string {
+  const iso = date.toISOString();
+  if (!iso) {
+    throw new Error("cron-parser returned an invalid date");
+  }
+  return iso;
+}
+
+function parseCron(recurrence: CronRecurrenceDefinition, currentDate: string) {
+  return CronExpressionParser.parse(normalizeCronExpression(recurrence.expression), {
+    currentDate,
+    tz: recurrence.timezone
+  });
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function validateCronExpression(rawExpression: unknown, timezone: string): void {
+  const expression = typeof rawExpression === "string" ? normalizeCronExpression(rawExpression) : "";
+  if (!expression) {
+    throw new Error("Enter a cron expression.");
+  }
+  if (expression.startsWith("@")) {
+    if (!CRON_NICKNAMES.has(expression)) {
+      throw new Error(`Unsupported nickname "${expression}". Use @yearly, @annually, @monthly, @weekly, @daily or @hourly.`);
+    }
+  } else {
+    const fields = expression.split(" ");
+    if (fields.length === 6) {
+      throw new Error(`Seconds are not supported. Use 5 fields: ${CRON_FIELDS_HELP}.`);
+    }
+    if (fields.length !== 5) {
+      throw new Error(`A cron expression needs 5 fields: ${CRON_FIELDS_HELP}.`);
+    }
+    if (fields.some((field) => /(^|[^a-z])h(?![a-z])/i.test(field))) {
+      throw new Error("H (random values) is not supported.");
+    }
+    if (/w/i.test(fields[2]!)) {
+      throw new Error("W (nearest weekday) is not supported.");
+    }
+  }
+  let parsed;
+  try {
+    parsed = CronExpressionParser.parse(expression, { tz: timezone });
+  } catch (error) {
+    const message = errorMessage(error);
+    throw new Error(message.includes("Invalid explicit day of month definition") ? NEVER_MATCHES : `Invalid cron expression: ${message}`);
+  }
+  try {
+    parsed.next();
+  } catch (error) {
+    const message = errorMessage(error);
+    throw new Error(message.includes("loop limit") ? NEVER_MATCHES : `Invalid cron expression: ${message}`);
+  }
+}
+
+/** First occurrence at or after staleBeforeIso, walking from 61 minutes earlier (design §1, DST quirk). */
+export function cronNextDue(
+  recurrence: CronRecurrenceDefinition,
+  staleBeforeIso: string
+): { nextDue: string; lastBefore: string | null } {
+  const iterator = parseCron(recurrence, new Date(Date.parse(staleBeforeIso) - 61 * 60_000).toISOString());
+  let lastBefore: string | null = null;
+  for (;;) {
+    const candidate = cronIso(iterator.next());
+    if (candidate >= staleBeforeIso) {
+      return { nextDue: candidate, lastBefore };
+    }
+    lastBefore = candidate;
+  }
+}
+
+/** Forward-only walk from the claimed occurrence (design §1); work bounded by cap + ~61 steps. */
+export function cronStaleWindow(
+  recurrence: CronRecurrenceDefinition,
+  fromIso: string,
+  staleBeforeIso: string,
+  cap: number
+): { count: number; capped: boolean; lastStale: string; nextDue: string } {
+  const iterator = parseCron(recurrence, fromIso);
+  let count = 1;
+  let lastStale = fromIso;
+  let capped = false;
+  for (;;) {
+    const candidate = cronIso(iterator.next());
+    if (candidate >= staleBeforeIso) {
+      break;
+    }
+    if (count >= cap) {
+      capped = true;
+      break;
+    }
+    count += 1;
+    lastStale = candidate;
+  }
+  const due = cronNextDue(recurrence, staleBeforeIso);
+  if (capped) {
+    lastStale = due.lastBefore ?? cronIso(parseCron(recurrence, staleBeforeIso).prev());
+  }
+  return { count, capped, lastStale, nextDue: due.nextDue };
+}
+
 export function validateRecurrenceDefinition(recurrence: RecurrenceDefinition): void {
   requireValidZone(recurrence.timezone);
 
@@ -82,6 +208,9 @@ export function validateRecurrenceDefinition(recurrence: RecurrenceDefinition): 
       if (!Number.isInteger(recurrence.dayOfMonth) || recurrence.dayOfMonth < 1 || recurrence.dayOfMonth > 31) {
         throw new Error("monthly schedules require a dayOfMonth between 1 and 31");
       }
+      return;
+    case "cron":
+      validateCronExpression(recurrence.expression, recurrence.timezone);
       return;
     default:
       throw new Error("Unsupported schedule type");
@@ -147,6 +276,8 @@ export function nextOccurrenceForRecurrence(
       }
       return null;
     }
+    case "cron":
+      return cronIso(parseCron(recurrence, afterUtc.toISO()!).next());
     default:
       return null;
   }
@@ -166,6 +297,14 @@ export function formatRecurrenceSummary(recurrence: RecurrenceDefinition): strin
       return `Every ${recurrence.dayOfWeek} at ${recurrence.localTime} (${recurrence.timezone})`;
     case "monthly":
       return `Monthly on day ${recurrence.dayOfMonth} at ${recurrence.localTime} (${recurrence.timezone})`;
+    case "cron": {
+      const expression = normalizeCronExpression(recurrence.expression);
+      try {
+        return `${cronstrue.toString(expression, { use24HourTimeFormat: true })} (${recurrence.timezone})`;
+      } catch {
+        return `Cron: ${expression} (${recurrence.timezone})`;
+      }
+    }
     default:
       return "Unknown recurrence";
   }
@@ -173,6 +312,12 @@ export function formatRecurrenceSummary(recurrence: RecurrenceDefinition): strin
 
 export function computeTaskNextRun(task: WorkspaceTask, afterIso?: string): string | null {
   if (!task.enabled) {
+    return null;
+  }
+  try {
+    validateRecurrenceDefinition(task.recurrence);
+  } catch {
+    // A hand-edited ledger must not fail the load: such a task is listed but never scheduled.
     return null;
   }
   return nextOccurrenceForRecurrence(task.recurrence, afterIso);
