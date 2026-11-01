@@ -17,13 +17,23 @@ import type {
 import { normalizeWorkspacePath, workspaceKeyFromPath } from "../shared/workspace.js";
 import {
   computeTaskNextRun,
+  CRON_COLLAPSE_CAP,
+  cronNextDue,
+  cronStaleWindow,
   formatRecurrenceSummary,
+  normalizeRecurrence,
   occurrenceKeyForTask,
   validateRecurrenceDefinition
 } from "./recurrence.js";
 import type { ExecutionRequestMetadata, LocalExecutionAdapter } from "./execution-adapter.js";
 import { HttpError } from "./http-error.js";
-import { deriveLastRunStatus, MISSED_UNAVAILABLE_SUMMARY, SAVE_FAILED_SUMMARY, STARTED_SUMMARY } from "./run-fold.js";
+import {
+  cronMissedSummary,
+  deriveLastRunStatus,
+  MISSED_UNAVAILABLE_SUMMARY,
+  SAVE_FAILED_SUMMARY,
+  STARTED_SUMMARY
+} from "./run-fold.js";
 import type { ListRunsOptions, RunPage, RunStore } from "./run-store.js";
 import { createExecutionProfile, normalizeExecutionProfile, resolveExecutionCapability } from "./settings.js";
 import { listWorkspaceLedgers, loadWorkspaceLedger, saveWorkspaceLedger } from "./storage.js";
@@ -100,6 +110,8 @@ type ClaimOutcome =
 
 export class SchedulerService {
   private readonly inFlightOccurrences = new Set<string>();
+  /** Executing runs per task (design §3 "Running-task count"); read only for cron tasks. */
+  private readonly runningTasks = new Map<string, number>();
   private readonly ledgerLocks = new Map<string, Promise<void>>();
 
   constructor(
@@ -107,6 +119,19 @@ export class SchedulerService {
     private readonly runStore: RunStore,
     private readonly frozenKeys: ReadonlySet<string> = new Set()
   ) {}
+
+  private incrementRunning(taskId: string): void {
+    this.runningTasks.set(taskId, (this.runningTasks.get(taskId) ?? 0) + 1);
+  }
+
+  private decrementRunning(taskId: string): void {
+    const remaining = (this.runningTasks.get(taskId) ?? 0) - 1;
+    if (remaining > 0) {
+      this.runningTasks.set(taskId, remaining);
+    } else {
+      this.runningTasks.delete(taskId);
+    }
+  }
 
   /** A workspace whose v0.2.0 import failed is frozen until a later start imports it (design §3). */
   private assertNotFrozen(workspacePath: string): void {
@@ -223,7 +248,8 @@ export class SchedulerService {
   }
 
   async createTask(request: CreateTaskRequest): Promise<WorkspaceTask> {
-    validateRecurrenceDefinition(request.recurrence);
+    const recurrence = normalizeRecurrence(request.recurrence);
+    validateRecurrenceDefinition(recurrence);
     return this.mutateLedger(request.workspacePath, (ledger) => {
       const createdAt = nowIso();
       const created: WorkspaceTask = {
@@ -232,8 +258,8 @@ export class SchedulerService {
         workspacePath: normalizeWorkspacePath(request.workspacePath),
         name: request.name.trim(),
         prompt: request.prompt.trim(),
-        recurrence: request.recurrence,
-        recurrenceSummary: formatRecurrenceSummary(request.recurrence),
+        recurrence,
+        recurrenceSummary: formatRecurrenceSummary(recurrence),
         enabled: true,
         nextRunAt: null,
         lastRunStatus: null,
@@ -247,8 +273,9 @@ export class SchedulerService {
   }
 
   async updateTask(taskId: string, request: UpdateTaskRequest): Promise<WorkspaceTask> {
-    return this.mutateLedger(request.workspacePath, (ledger) =>
-      this.derivedCopy(ledger, this.updateTaskLocked(ledger, taskId, request))
+    const normalized = request.recurrence ? { ...request, recurrence: normalizeRecurrence(request.recurrence) } : request;
+    return this.mutateLedger(normalized.workspacePath, (ledger) =>
+      this.derivedCopy(ledger, this.updateTaskLocked(ledger, taskId, normalized))
     );
   }
 
@@ -381,12 +408,14 @@ export class SchedulerService {
     }
 
     const executionRequest = this.executionAdapter.createRequest(task, profile, base.scheduledFor);
+    this.runStore.appendEvent({ ...base, type: "started", at: nowIso(), summary: STARTED_SUMMARY, executionRequest });
     this.inFlightOccurrences.add(base.occurrenceKey);
+    this.incrementRunning(task.id);
     try {
-      this.runStore.appendEvent({ ...base, type: "started", at: nowIso(), summary: STARTED_SUMMARY, executionRequest });
       await this.executeAndRecord({ base, task, profile, executionRequest });
     } finally {
       this.inFlightOccurrences.delete(base.occurrenceKey);
+      this.decrementRunning(task.id);
     }
     return this.requireRun(runId);
   }
@@ -430,10 +459,15 @@ export class SchedulerService {
             await this.executeAndRecord(outcome.run);
           } finally {
             this.inFlightOccurrences.delete(outcome.run.base.occurrenceKey);
+            this.decrementRunning(outcome.run.base.taskId);
           }
           break;
         }
         if (outcome.kind === "skipped") {
+          break;
+        }
+        if (outcome.nextRunAt !== null && outcome.nextRunAt <= scheduledFor) {
+          logTickError(new Error(`next run ${outcome.nextRunAt} is not after ${scheduledFor}; stopping catch-up`), snapshot.workspaceKey);
           break;
         }
         scheduledFor = outcome.nextRunAt;
@@ -441,7 +475,7 @@ export class SchedulerService {
     }
   }
 
-  /** Compare-and-set inside the lock (design §2 "Claiming a scheduled occurrence"). */
+  /** Compare-and-set inside the lock; claim order design §3 steps 1–6. */
   private async claimOccurrence(
     workspacePath: string,
     taskId: string,
@@ -457,9 +491,26 @@ export class SchedulerService {
         }
         const workspaceKey = workspaceKeyFromPath(ledger.workspacePath);
         const occurrenceKey = occurrenceKeyForTask(task.id, scheduledFor);
-        task.nextRunAt = computeTaskNextRun(task, scheduledFor);
-        if (this.inFlightOccurrences.has(occurrenceKey) || this.runStore.hasOccurrence(workspaceKey, occurrenceKey)) {
+        const stale = isOutsideExecutionGraceWindow(scheduledFor, tickStartedAt);
+        const staleBeforeIso = new Date(Date.parse(tickStartedAt) - EXECUTION_GRACE_WINDOW_MS).toISOString();
+        const cronRecurrence = task.recurrence.scheduleType === "cron" ? task.recurrence : null;
+        /** Steps 1–2: a stale cron backlog jumps to the next due run; otherwise the following occurrence. */
+        const advanceWithoutRecord = (): ClaimOutcome => {
+          task.nextRunAt =
+            cronRecurrence && stale
+              ? cronNextDue(cronRecurrence, staleBeforeIso).nextDue
+              : computeTaskNextRun(task, scheduledFor);
           return { kind: "advanced", nextRunAt: task.nextRunAt };
+        };
+
+        // Step 1: already known.
+        if (this.inFlightOccurrences.has(occurrenceKey) || this.runStore.hasOccurrence(workspaceKey, occurrenceKey)) {
+          return advanceWithoutRecord();
+        }
+
+        // Step 2: cron task still running.
+        if (cronRecurrence && (this.runningTasks.get(task.id) ?? 0) > 0) {
+          return advanceWithoutRecord();
         }
 
         const base: RunBase = {
@@ -473,17 +524,33 @@ export class SchedulerService {
         };
         const profile = ledger.executionProfile;
         const capability = resolveExecutionCapability(profile ?? null);
-        if (capability.status !== "ready" || !profile || isOutsideExecutionGraceWindow(scheduledFor, tickStartedAt)) {
-          const summary = capability.status !== "ready" ? capability.message : MISSED_UNAVAILABLE_SUMMARY;
+        const notReadyMessage = capability.status !== "ready" || !profile ? capability.message : null;
+
+        // Step 3: cron, stale → collapse, keyed on the first stale occurrence.
+        if (cronRecurrence && stale) {
+          const window = cronStaleWindow(cronRecurrence, scheduledFor, staleBeforeIso, CRON_COLLAPSE_CAP);
+          task.nextRunAt = window.nextDue;
+          const summary = cronMissedSummary(window, scheduledFor, cronRecurrence.timezone, notReadyMessage);
           this.runStore.appendEvent({ ...base, type: "missed", at: nowIso(), summary, failureReason: summary });
           return { kind: "advanced", nextRunAt: task.nextRunAt };
         }
 
-        const executionRequest = this.executionAdapter.createRequest(task, profile, scheduledFor);
+        task.nextRunAt = computeTaskNextRun(task, scheduledFor);
+
+        // Steps 4–5: profile not ready, or other types stale → one missed event (as today).
+        if (notReadyMessage !== null || stale) {
+          const summary = notReadyMessage ?? MISSED_UNAVAILABLE_SUMMARY;
+          this.runStore.appendEvent({ ...base, type: "missed", at: nowIso(), summary, failureReason: summary });
+          return { kind: "advanced", nextRunAt: task.nextRunAt };
+        }
+
+        // Step 6: start.
+        const executionRequest = this.executionAdapter.createRequest(task, profile!, scheduledFor);
         this.inFlightOccurrences.add(occurrenceKey);
         claim.addedKey = occurrenceKey;
         this.runStore.appendEvent({ ...base, type: "started", at: nowIso(), summary: STARTED_SUMMARY, executionRequest });
-        claim.started = { base, task: { ...task }, profile, executionRequest };
+        claim.started = { base, task: { ...task }, profile: profile!, executionRequest };
+        this.incrementRunning(task.id);
         return { kind: "started", nextRunAt: task.nextRunAt, run: claim.started };
       });
     } catch (error) {
@@ -491,6 +558,7 @@ export class SchedulerService {
         this.inFlightOccurrences.delete(claim.addedKey);
       }
       if (claim.started) {
+        this.decrementRunning(claim.started.base.taskId);
         try {
           this.runStore.appendEvent({
             ...claim.started.base,

@@ -1,3 +1,4 @@
+import { DateTime } from "luxon";
 import type { RunEvent, RunStatus, ScheduledRun, WorkspaceTask } from "../shared/model.js";
 
 export const STARTED_SUMMARY = "Command started.";
@@ -33,4 +34,25 @@ export function foldRun(events: RunEvent[]): ScheduledRun {
 
 export function deriveLastRunStatus(task: WorkspaceTask, latest: ScheduledRun | null | undefined): RunStatus | null {
   return latest?.status ?? task.legacyLastRunStatus ?? null;
+}
+
+function formatCollapseTime(iso: string, timezone: string): string {
+  return DateTime.fromISO(iso, { zone: "utc" }).setZone(timezone).setLocale("en").toFormat("yyyy-LL-dd HH:mm ZZZZ");
+}
+
+/** The collapsed missed-run message (design §3 "Collapse"). */
+export function cronMissedSummary(
+  window: { count: number; capped: boolean; lastStale: string },
+  firstIso: string,
+  timezone: string,
+  notReadyMessage: string | null
+): string {
+  if (window.count === 1) {
+    return notReadyMessage ?? MISSED_UNAVAILABLE_SUMMARY;
+  }
+  const reason = notReadyMessage ? notReadyMessage.replace(/\.$/, "") : "the scheduler did not run them in time";
+  const between = `between ${formatCollapseTime(firstIso, timezone)} and ${formatCollapseTime(window.lastStale, timezone)} (${reason}).`;
+  return window.capped
+    ? `Missed 1,440 or more runs ${between}`
+    : `Missed ${window.count.toLocaleString("en-US")} runs ${between}`;
 }
