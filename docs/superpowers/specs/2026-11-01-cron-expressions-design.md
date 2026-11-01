@@ -1,6 +1,6 @@
 # Cron Expressions — Design
 
-**Date:** 2026-11-01 (revised after two review rounds)
+**Date:** 2026-11-01 (revised after three review rounds)
 **Branch:** `004-cron-expressions` (from `master` at `e9134a4`, which includes `003-run-event-log`)
 **Spec-kit spec:** [`specs/004-cron-expressions/spec.md`](../../../specs/004-cron-expressions/spec.md)
 
@@ -63,7 +63,7 @@ Runs on the expression **after** `normalizeRecurrence` (validation normalises in
 1. `expression` missing, not a string, or empty → `Enter a cron expression.`
 2. Starts with `@`:
    - `@yearly`, `@annually`, `@monthly`, `@weekly`, `@daily`, `@hourly` → go to step 6;
-   - otherwise → `Unsupported nickname "<value>". Use @yearly, @annually, @monthly, @weekly, @daily or @hourly.`
+   - otherwise → `Unsupported nickname "<value>". Use @yearly, @annually, @monthly, @weekly, @daily or @hourly.` (`<value>` is the normalised, lower-cased text)
 3. Field count (split on single spaces):
    - 6 → `Seconds are not supported. Use 5 fields: minute hour day-of-month month day-of-week.`
    - not 5 → `A cron expression needs 5 fields: minute hour day-of-month month day-of-week.`
@@ -80,10 +80,13 @@ Because storage validates saved tasks with this function (`isRecurrenceDefinitio
 ### Occurrences — `src/server/recurrence.ts`
 
 - `nextOccurrenceForRecurrence`, `case "cron"`: `parse(expression, { currentDate: afterIso, tz }).next()` → UTC ISO. `computeTaskNextRun`, the claim, the refresh rule, the edit rule and the dashboard already use it.
-- New exported helper `cronStaleWindow(recurrence, fromIso, staleBeforeIso, cap)` for the collapse (§3). An occurrence is *stale* when it is strictly before `staleBeforeIso` (= `tickStartedAt − 90 s`, matching the grace rule `tickStartedAt − t > 90 s`). It returns:
-  - `nextDue`: the first occurrence at or after `staleBeforeIso` (`parse(…, { currentDate: staleBeforeIso − 1 ms }).next()`);
-  - `lastStale`: the last occurrence strictly before `staleBeforeIso` and at or after `fromIso` (`parse(…, { currentDate: staleBeforeIso }).prev()`), or `null`;
-  - `count`: occurrences from `fromIso` (inclusive) up to `lastStale` (inclusive), counted by iterating one instance created with `currentDate: fromIso − 1 ms`, stopping at `cap`; `capped: true` when `cap` occurrences were counted before reaching `lastStale`.
+- An occurrence is *stale* when it is strictly before `staleBeforeIso` = `tickStartedAt − 90 s` (the grace rule `tickStartedAt − t > 90 s`).
+- New exported helper `cronNextDue(recurrence, staleBeforeIso)`: the first occurrence at or after `staleBeforeIso` (`parse(…, { currentDate: staleBeforeIso − 1 ms }).next()`). Used by claim steps 1 and 2 (no counting).
+- New exported helper `cronStaleWindow(recurrence, fromIso, staleBeforeIso, cap)` for the collapse (§3). It walks **forward only** with one parser instance created at `currentDate: fromIso − 1 ms`, calling `next()` while the result is stale:
+  - `count`: the number of stale occurrences seen, stopping at `cap`; `capped: true` if the walk stopped at `cap` with more stale occurrences remaining;
+  - `lastStale`: the last stale occurrence seen; when `capped`, the walk continues with `next()` (without counting) until the next result is not stale, so `lastStale` is always the true last stale occurrence. (`prev()` is not used: across the spring DST gap it skips the occurrence that `next()` shifts to 03:30.)
+  - `nextDue`: `cronNextDue(recurrence, staleBeforeIso)`;
+  - `count` is 0 (and `lastStale` null) only if `fromIso` is itself not stale or not an occurrence, e.g. a hand-edited `nextRunAt`.
 - Safety: the scheduler's catch-up loop stops (and logs) if a computed next run is not strictly after the occurrence it advanced from. `next()` guarantees this; the guard prevents an infinite loop if a library update ever breaks it.
 
 ### Summary — `formatRecurrenceSummary`, `case "cron"`
@@ -100,14 +103,15 @@ Because storage validates saved tasks with this function (`isRecurrenceDefinitio
 
 - **Dropdown:** "Cron expression" (`value="cron"`) is added last in Schedule Type.
 - **Field** (`data-schedule-scope="cron"`): label "Cron Expression", monospace text input `name="cronExpression"`, placeholder `*/15 9-17 * * MON-FRI`. Help text: `minute hour day-of-month month day-of-week · supports * , - / L # ? and @daily-style nicknames · W and H not supported`.
-- **Default for a new cron task:** `0 9 * * MON-FRI`. Editing a cron task fills in its stored expression.
+- **Default:** `0 9 * * MON-FRI` for a new task, and when an existing non-cron task is switched to Cron. Editing a cron task fills in its stored expression.
 - **Visibility:** Timezone stays visible. Local Time (`data-schedule-scope="timed"`) is hidden for `one_time` and `cron`. The cron field is shown only for `cron`.
 - **Preview** (the existing Validation panel; it refreshes on input and, as today for every type, appears once name and prompt are filled in):
   - valid cron → the summary line, then the next 5 run times in the task's time zone, formatted with luxon `ccc d LLL HH:mm` in locale `en` (e.g. `Mon 2 Nov 09:00`), one per line;
-  - **frequency warning:** over the next 25 occurrences from now, take the smallest gap `G` between consecutive runs; if `G < 5 min`, add `Runs as often as every <N> min, <X> times in 24 hours. Each run sends the prompt to Claude.` where `N` = `G` in whole minutes (minimum 1) and `X` = the number of occurrences in the 24 hours starting at the first upcoming run (start inclusive, end exclusive), counted up to 1,440 and shown as `1,440+` at the cap. Starting at the first upcoming run keeps `X` above zero whatever day and time the expression is typed. The warning never blocks Save;
+  - **frequency warning:** over the next 25 occurrences from now, take the smallest gap `G` between consecutive runs; if `G < 5 min`, add `Runs as often as every <N> min, <X> times in 24 hours. Each run sends the prompt to Claude.` where `N` = `G` in whole minutes (minimum 1) and `X` = the number of occurrences in the 24 hours starting at the first upcoming run (start inclusive, end exclusive), formatted with `en-US` grouping (at most `1,440`, i.e. every minute). Starting at the first upcoming run keeps `X` above zero whatever day and time the expression is typed; `G` and `X` can still differ with the moment of typing for irregular expressions. The warning never blocks Save;
   - invalid → the validation message in the existing feedback alert; Save is blocked, as for other validation errors;
   - other schedule types keep their current single-line preview;
-  - the form keeps the result for the last (expression, time zone) pair it validated and reuses it while neither changes, so a slow expression (a never-matching one takes ≈ 400 ms to reject) is evaluated once, not on every keystroke elsewhere in the form.
+  - the form keeps the result for the last (normalised expression, time zone, current minute) it validated and reuses it while none changes, so a slow expression (a never-matching one takes ≈ 400 ms to reject) is evaluated once rather than on every keystroke elsewhere in the form, and the next-run times refresh each minute;
+  - the multi-line preview is built from element nodes whose text is set with `textContent` (one element per line), as the panel uses `textContent` today.
 
 ### Escaping — one `escapeHtml` helper (`& < > " '`) in `src/client/`
 
@@ -123,7 +127,7 @@ Today both views interpolate these unescaped; a `"` breaks an input and a `<` is
 ### Running-task count
 
 - New in-memory `runningTasks: Map<string, number>` (task ID → number of executing runs of that task), next to `inFlightOccurrences`.
-- Increment only after the `started` `appendEvent` call has returned — in the claim (at the point where `claim.started` is set) and in `runManually` (manual runs and retries, before its `try`). An append that throws never increments.
+- Increment only after the `started` `appendEvent` call has returned. In the claim, at the point where `claim.started` is set. In `runManually` (manual runs and retries), the code is restructured to: append `started` (outside any `try`), increment, then `try { executeAndRecord } finally { decrement }` — so an append that throws neither increments nor decrements.
 - Decrement (deleting the entry at 0) exactly once per increment: the `finally` after `executeAndRecord` in `tickWorkspace` and in `runManually`, **and** the claim's `catch` when `claim.started` is set (the save failed after `started` was appended, so no execution follows).
 - The count is read only by claim step 2, and only for `cron` tasks.
 - After a process restart the map is empty; startup recovery has already closed the previous runs as `failed`. Whether an orphaned child process from the previous server keeps running is outside this feature.
@@ -133,10 +137,10 @@ Today both views interpolate these unescaped; a `"` breaks an input and a `<` is
 Inside the existing compare-and-set claim, after `task exists && task.enabled && task.nextRunAt === scheduledFor` holds (otherwise skip, unchanged). Let `stale` = `tickStartedAt - scheduledFor > 90 s` (today's grace rule).
 
 1. **Already known** (`inFlightOccurrences.has(key) || hasOccurrence(workspaceKey, key)`):
-   - `cron` and `stale` → set `nextRunAt` to `cronStaleWindow(…).nextDue` (a retried collapse jumps the backlog without recording again);
+   - `cron` and `stale` → set `nextRunAt` to `cronNextDue(recurrence, tickStartedAt − 90 s)` (a retried collapse jumps the backlog without recording again);
    - otherwise → advance to the following occurrence, as today.
 2. **Cron task still running** (`cron` and `runningTasks.get(task.id) > 0`):
-   - `stale` → set `nextRunAt` to `cronStaleWindow(…).nextDue` (jumps the whole stale backlog in one claim), record nothing;
+   - `stale` → set `nextRunAt` to `cronNextDue(recurrence, tickStartedAt − 90 s)` (jumps the whole stale backlog in one claim), record nothing;
    - not stale → set `nextRunAt` to the following occurrence, record nothing.
    Return `advanced`. Manual runs and retries are never blocked by this check. The five existing types never take this step: they keep today's behaviour, including starting a scheduled run while a manual run of the same task is executing.
 3. **Cron, stale** → collapse (below). Applies whatever the reason the occurrence could not run (scheduler down, or execution profile not ready).
@@ -149,6 +153,7 @@ Inside the existing compare-and-set claim, after `task exists && task.enabled &&
 With `w = cronStaleWindow(recurrence, scheduledFor, tickStartedAt − 90 s, 1440)`:
 
 1. `nextRunAt = w.nextDue`. This may be ≤ `tickStartedAt` (due within the grace window); the catch-up loop then claims and runs it on the same tick.
+   If `w.count` is 0 (a hand-edited `nextRunAt` that is not an occurrence), stop here: nothing is recorded.
 2. Append **one** `missed` event keyed on the **first** stale occurrence: its `scheduledFor` and occurrence key are the claimed `scheduledFor`'s. (Step 1 already returned if that key was recorded, so a retried claim after a failed save never appends a second event, whatever window a later tick computes.) `summary` and `failure_reason`:
    - `count` = 1 → today's text: the capability message if the profile is not ready, else `Automatic execution was unavailable at the scheduled time.`
    - `count` > 1, not capped → `Missed <count> runs between <first> and <last> (<reason>).`
@@ -158,7 +163,7 @@ With `w = cronStaleWindow(recurrence, scheduledFor, tickStartedAt − 90 s, 1440
 
 Example: `* * * * *`, `nextRunAt` 8 h before a tick at `T + 10 s` where `T` is on a minute boundary → stale occurrences are `T−8h … T−2min` (479), one `missed` event keyed on `T−8h` says `Missed 479 runs between … (the scheduler did not run them in time).`, `nextRunAt` = `T−1min`, which the same tick then starts.
 
-The existing failure handling is unchanged: a failed save after the collapsed `missed` leaves `nextRunAt` as it was; the next claim finds that occurrence key recorded (step 1) and jumps to `nextDue` without recording again. A failed save after `started` appends `SAVE_FAILED_SUMMARY` and now also decrements `runningTasks`.
+The existing failure handling is unchanged: a failed save after the collapsed `missed` leaves `nextRunAt` as it was; the next claim finds that occurrence key recorded (step 1) and jumps to `nextDue` without recording again. Accepted limit: occurrences that become stale *between* that failed save and the retry are not recorded (they exist only while ledger saves are failing). A failed save after `started` appends `SAVE_FAILED_SUMMARY` and now also decrements `runningTasks`.
 
 ## 4. Testing and rollout
 
@@ -170,13 +175,13 @@ The existing failure handling is unchanged: a failed save after the collapsed `m
   - every rejection message in §1 (missing/non-string, empty, `@midnight`, `@reboot`, 6 fields, 3 fields, `H 9 * * *`, `0 H/2 * * *`, `15W`, `LW`, `60 9 * * *`, `0 9 31 4,6,9,11 *`, `0 9 31 2 *`);
   - `nextOccurrenceForRecurrence` and the summary accept an un-normalised stored `@DAILY`;
   - `normalizeRecurrence` (outer trim, inner whitespace, nickname case, other text untouched, other types unchanged);
-  - `cronStaleWindow` (count, lastStale, nextDue, cap);
+  - `cronStaleWindow` (count, lastStale, nextDue, cap; `lastStale` correct when capped; `30 2 * * *` across 2026-03-29 in `Europe/Amsterdam` counts the shifted 03:30 run); `cronNextDue`;
   - summary text with time zone, and the fallback.
 - `tests/integration/task-form.test.ts` (jsdom):
   - choosing Cron shows the cron field and hides Local Time;
   - a valid expression shows the summary and exactly 5 run lines (locale `en`);
   - `15W` and `H 9 * * *` show their messages and block submit;
-  - warning: `* * * * *` → `every 1 min, 1,440+ times`; `* 9 * * *` at 10:00 → `every 1 min, 60 times`; `* 9 * * MON-FRI` on a Friday at 10:00 → `60 times`; `0,2 9 * * *` at 09:01 → warns; `*/10 * * * *` → no warning;
+  - warning: `* * * * *` → `every 1 min, 1,440 times`; `* 9 * * *` at 10:00 → `every 1 min, 60 times`; `* 9 * * MON-FRI` on a Friday at 10:00 → `60 times`; `0,2 9 * * *` at 09:01 → warns; `*/10 * * * *` → no warning;
   - typing in the name field does not re-validate an unchanged expression (validation called once);
   - editing round-trips the stored expression;
   - a name and an expression containing `"` and `<` render without breaking the inputs; the schedule list shows them as text.
@@ -191,7 +196,8 @@ The existing failure handling is unchanged: a failed save after the collapsed `m
   - overlap with a stale backlog during a run → one claim jumps to `nextDue`, nothing recorded;
   - manual run during a scheduled cron run → runs; after the manual run ends the scheduled run is still counted (no second scheduled copy starts);
   - a daily task due during a manual run of the same task → starts as today (the overlap guard is cron-only);
-  - a failed save after `started` → `runningTasks` is back to 0 and the next occurrence can run.
+  - a failed save after `started` → `runningTasks` is back to 0 and the next occurrence can run;
+  - a manual run whose `started` append throws during a scheduled cron run → the scheduled run is still counted (no second scheduled copy starts).
 - `tests/unit/storage.test.ts`: a ledger with a cron task loads it; one with `0 9 31 4,6,9,11 *` drops it with the existing warning.
 - Create/update over the API with `"  @DAILY "` stores `@daily`.
 
