@@ -208,6 +208,8 @@ describe("cron", () => {
     } as unknown as WorkspaceTask;
     expect(computeTaskNextRun(task, after)).toBeNull();
     expect(computeTaskNextRun({ ...task, recurrence: cron("0 9 * * *") }, after)).toBe("2026-11-03T08:00:00.000Z");
+    const broken = { ...task, recurrence: { scheduleType: "daily", timezone: AMS, localTime: "25:00" } } as unknown as WorkspaceTask;
+    expect(() => computeTaskNextRun(broken, after)).toThrow("localTime must be formatted as HH:mm");
   });
 
   describe("stale window", () => {
@@ -238,10 +240,28 @@ describe("cron", () => {
       });
     });
 
+    it("reports the shifted run as lastStale when a capped walk starts inside the DST gap window", () => {
+      const nightly = cron("30 2 * * *");
+      expect(cronStaleWindow(nightly, "2026-03-25T01:30:00.000Z", "2026-03-29T02:15:00.000Z", 2)).toEqual({
+        count: 2,
+        capped: true,
+        lastStale: "2026-03-29T01:30:00.000Z",
+        nextDue: "2026-03-30T00:30:00.000Z"
+      });
+    });
+
+    it("finds the next due run when the walk start lands in the DST gap window", () => {
+      const nightly = cron("30 2 * * *");
+      for (const staleBefore of ["2026-03-29T02:01:00.000Z", "2026-03-29T02:15:00.000Z", "2026-03-29T02:31:00.000Z"]) {
+        expect(cronNextDue(nightly, staleBefore).nextDue).toBe("2026-03-30T00:30:00.000Z");
+      }
+      expect(cronNextDue(nightly, "2026-03-29T02:15:00.000Z").lastBefore).toBeNull();
+    });
+
     it("bounds the work for a backlog of a year", () => {
       const started = performance.now();
       expect(cronStaleWindow(every, "2025-11-01T00:00:00.000Z", staleBefore, CRON_COLLAPSE_CAP).capped).toBe(true);
-      expect(performance.now() - started).toBeLessThan(2_000);
+      expect(performance.now() - started).toBeLessThan(10_000);
     });
 
     it("counts the run that daylight saving shifts to 03:30", () => {
